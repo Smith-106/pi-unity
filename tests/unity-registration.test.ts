@@ -7,6 +7,7 @@ import { resolveArtifactProfilesV1, resolveArtifactSearchServiceV1, resolveTodoL
 import { resolveFileDiscoveryFiltersV1 } from "@aefree/pi-file-discovery/contracts/v1";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import registerUnity from "../index";
+import { writeNormalizedUnityTestArtifact, type NormalizedUnityTestResult } from "../src/unity-tests";
 
 initTheme("dark");
 
@@ -258,7 +259,101 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     await rm(root, { recursive: true, force: true });
   }
 }
-console.log("pi-unity reverse load-order and delayed-shutdown registration tests passed");
+{
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-artifact-contract-"));
+  try {
+    await mkdir(join(root, "ProjectSettings"));
+    await mkdir(join(root, "Packages"));
+    await mkdir(join(root, "Logs"));
+    await writeFile(join(root, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
+    await writeFile(join(root, "Packages", "manifest.json"), '{"dependencies":{}}');
+    let dispatches = 0;
+    const pi = fakePi(async () => { dispatches++; throw new Error("Artifact inspection must not execute Unity"); });
+    registerUnity(pi as any);
+    const tool = pi.tools.find(item => item.name === "unity_inspect_artifacts");
+    const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
+    const inspect = (params: any) => tool.execute("artifacts", { path: root, ...params }, undefined, undefined, ctx);
+    const base: NormalizedUnityTestResult = {
+      schemaVersion: 1, source: "pipeline", platform: "EditMode", selection: { testFilters: ["Synthetic.Suite"], testCategories: [] },
+      outcome: "passed", summary: { total: 2, passed: 2, failed: 0 }, tests: [{ name: "Synthetic.One", status: "Passed" }],
+    };
+    const artifact = async (result: NormalizedUnityTestResult) => writeNormalizedUnityTestArtifact(root, result);
+    const passing = await artifact(base);
+    const latest = await inspect({});
+    assert.equal(latest.details.testOutcome, "passed", "JSON-only discovery is first-class inspection input.");
+    assert.match(latest.content[0].text, /does not establish current-run identity/);
+    const flaky = await artifact({ ...base, outcome: "passed_with_flakes", flakyTests: [{ name: "Synthetic.One", attempts: 2 }] });
+    assert.equal((await inspect({ normalizedResultPath: flaky })).details.testOutcome, "passed_with_flakes");
+    // Existing unrelated latest XML/logs must not be selected for an exact JSON request.
+    await writeFile(join(root, "Logs", "unrelated.xml"), '<test-run total="1" passed="0" failed="1"></test-run>');
+    await writeFile(join(root, "Logs", "unrelated.log"), "Synthetic previous run log");
+    const success = await inspect({ normalizedResultPath: passing });
+    assert.equal(success.details.status, "passed");
+    assert.equal(success.details.testOutcome, "passed");
+    assert.equal(success.details.normalizedResult.testRecordCount, 1, "Bounded records need not equal total.");
+    assert.equal(success.details.normalizedResult.tests, undefined, "Routine output must not retain all records.");
+    assert.equal(success.details.artifacts.testResultsPath, undefined, "Explicit request disables unrelated latest XML.");
+    assert.equal(success.details.artifacts.logFilePath, undefined);
+    const failed = await artifact({ ...base, outcome: "tests_failed", summary: { total: 1, passed: 0, failed: 1 }, tests: [{ name: "Synthetic.Failing", status: "Failed", message: "Synthetic assertion mismatch" }] });
+    const failure = await inspect({ normalizedResultPath: failed, latestFromLogs: false });
+    assert.equal(failure.details.status, "passed", "Successful inspection is not a passing test run.");
+    assert.equal(failure.details.testOutcome, "tests_failed");
+    assert.match(failure.content[0].text, /Synthetic assertion mismatch/);
+    for (const outcome of ["uncertain", "timed_out", "cancelled", "run_error", "empty_selection"] as const) {
+      const zero = await artifact({ ...base, outcome, summary: { total: 0, passed: 0, failed: 0 }, tests: [] });
+      const result = await inspect({ normalizedResultPath: zero });
+      assert.equal(result.details.status, "passed", outcome);
+      assert.equal(result.details.testOutcome, outcome, "Valid uncertainty/empty evidence never becomes passing tests.");
+    }
+    const unknown = await artifact({ ...base, outcome: "uncertain", summary: {}, tests: [] });
+    assert.equal((await inspect({ normalizedResultPath: unknown })).details.testOutcome, "uncertain", "Schema-v1 counts are optional, not invented.");
+    for (const [label, value] of [
+      ["malformed", "{"], ["null", "null"], ["partial", { schemaVersion: 1, outcome: "passed" }],
+      ["schema", { ...base, schemaVersion: 2 }], ["source", { ...base, source: "unknown" }],
+      ["platform", { ...base, platform: "Unknown" }], ["outcome", { ...base, outcome: "ok" }],
+      ["selection", { ...base, selection: {} }], ["records", { ...base, tests: [null] }],
+      ["zero-pass", { ...base, summary: { total: 0, passed: 0, failed: 0 }, tests: [] }],
+      ["unknown-pass", { ...base, summary: {}, tests: [] }],
+      ["inconsistent", { ...base, summary: { total: 1, passed: 2, failed: 0 } }],
+      ["fractional", { ...base, summary: { total: 1.5, passed: 1.5, failed: 0 } }],
+      ["negative", { ...base, summary: { total: 2, passed: 2, failed: -1 } }],
+      ["record-conflict", { ...base, tests: [{ name: "Synthetic.Failing", status: "Failed" }] }],
+      ["identity", { ...base, backendArtifacts: { nunit: "../other/results.xml" } }],
+      ["timestamp", { ...base, completedAt: "not-a-date" }],
+    ] as const) {
+      const file = join(root, "Logs", `${label}.json`);
+      await writeFile(file, typeof value === "string" ? value : JSON.stringify(value));
+      await assert.rejects(() => inspect({ normalizedResultPath: file }), /could not be loaded\/validated/, label);
+    }
+    for (const key of ["normalizedResultPath", "testResultsPath", "logFilePath"]) {
+      await assert.rejects(() => inspect({ [key]: "Logs/missing-evidence", ...(key === "normalizedResultPath" ? {} : { normalizedResultPath: passing }) }), /missing-evidence/, `Missing explicit ${key} must not be masked by valid other evidence.`);
+    }
+    await assert.rejects(() => inspect({ latestFromLogs: false }), /No valid Unity artifacts/);
+    const xmlPath = join(root, "Logs", "exact.xml");
+    await writeFile(xmlPath, '<test-run total="2" passed="2" failed="0"></test-run>');
+    const linked = await artifact({ ...base, source: "unity-cli", backendArtifacts: { nunit: "Logs/exact.xml" } });
+    const mixed = await inspect({ normalizedResultPath: linked, testResultsPath: xmlPath });
+    assert.equal(mixed.details.testOutcome, "passed", "Matching linked native evidence is supported.");
+    const uncorrelated = await inspect({ normalizedResultPath: passing, testResultsPath: xmlPath });
+    assert.equal(uncorrelated.details.testOutcome, "uncertain", "Matching counts alone do not establish shared run identity.");
+    assert.match(uncorrelated.content[0].text, /no shared run identity/);
+    await assert.rejects(() => inspect({ normalizedResultPath: linked, testResultsPath: "Logs/unrelated.xml" }), /Conflicting/);
+    await writeFile(join(root, "Logs", "different-run.xml"), '<test-run total="2" passed="2" failed="0"></test-run>');
+    await assert.rejects(() => inspect({ normalizedResultPath: linked, testResultsPath: "Logs/different-run.xml" }), /Conflicting artifact identity/, "Identical counts must not mask an explicit run path mismatch.");
+    await writeFile(xmlPath, '<test-run total="1" passed="2" failed="0"></test-run>');
+    await assert.rejects(() => inspect({ testResultsPath: xmlPath }), /inconsistent counts/);
+    await writeFile(xmlPath, '<test-run total="2" passed="1" failed="1"></test-run>');
+    await assert.rejects(() => inspect({ normalizedResultPath: linked, testResultsPath: xmlPath }), /Conflicting normalized\/XML/);
+    const xmlFailure = await inspect({ testResultsPath: xmlPath });
+    assert.equal(xmlFailure.details.status, "passed");
+    assert.equal(xmlFailure.details.testOutcome, "tests_failed");
+    const logOnly = await inspect({ logFilePath: "Logs/unrelated.log" });
+    assert.equal(logOnly.details.status, "passed");
+    assert.equal(logOnly.details.testOutcome, undefined, "A loaded log alone is not test evidence.");
+    assert.equal(dispatches, 0, "All artifact cases are read-only and offline.");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+console.log("pi-unity reverse load-order, result-contract and delayed-shutdown registration tests passed");
 
 {
   const warningSymbol = Symbol.for("@aefree/pi-unity/unity-cli-warning/v1");

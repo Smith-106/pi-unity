@@ -45,7 +45,9 @@ A timeout is uncertain: work may still be running. The tools do not silently can
 
 - `unity_open_editor` — open the Unity Editor GUI. Pass `automated: true` to add the Unity Editor `-automated` flag; this is distinct from the Unity CLI's own `--non-interactive` option.
 - `unity_launch_batchmode` — run a bounded batchmode command through Unity CLI or the direct Editor executable.
-- `unity_inspect_artifacts` — summarize existing Unity Test Framework XML and Unity logs without launching Unity.
+- `unity_inspect_artifacts` — validate existing normalized JSON test artifacts, Unity Test Framework XML and Unity logs without launching Unity. `details.status` describes inspection; `details.testOutcome` describes the tests, including failures and uncertainty. A valid failed-test artifact is a successful inspection, not a passing run.
+
+Pass `normalizedResultPath` for standalone JSON evidence. Any explicit artifact path disables implicit latest-file selection; missing requested files fail inspection. With all paths omitted, `latestFromLogs` discovers recent files but cannot establish current-run identity. Mixed JSON/XML evidence must agree; without an explicit native artifact link, matching counts alone leave correlation uncertain.
 
 Use `unity_run_tests` for all ordinary Unity Test Framework work. It writes a durable normalized JSON result under `Logs/`; isolated `unity test` runs retain requested native reports. Connected Pipeline is selected only for compatible requests. A reachable Editor is never closed automatically to obtain isolated-only features.
 

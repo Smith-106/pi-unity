@@ -7,7 +7,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { getKeybindings, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
   buildUnityBatchmodeAgentText,
-  deriveUnityArtifactInspectionStatus,
   deriveUnityBatchmodeStatus,
   hasKnownPositiveExecutedTestCount,
   loadUnityBatchmodeArtifacts,
@@ -29,6 +28,8 @@ import { assertUnityProjectNotBusy, evaluateUnityLaunchSafety, getUnityNativeLoc
 import { readUnityVersion, resolveUnityProjectCandidates, type UnityProjectCandidate } from "./src/unity-projects";
 import { createUnityTestBatchPlan, type UnityTestBatchPlan, type UnityTestPlatform } from "./src/unity-test-batch";
 import { applyUnityCliRetrySummary, compactUnityTestSummary, defaultUnityTestReportFormats, deriveUnityCliEffectiveReportPath, determineUnityTestOutcome, getUnityTestRouteRequirements, normalizeUnityRunTestsRequest, parseUnityCliRetrySummary, resolveUnityCliBackendReportPaths, writeNormalizedUnityTestArtifact, type NormalizedUnityTestResult, type UnityRunTestsRequest } from "./src/unity-tests";
+import { validateNormalizedUnityTestArtifact } from "./src/unity-artifact-inspection";
+import { UNITY_TEST_MAX_ARTIFACT_BYTES } from "./src/unity-tests";
 import { auditUnityGuidance, type UnityGuidanceAuditResult } from "./src/unity-guidance-audit";
 import { runUnityPipelineRecompile, runUnityPipelineTests, type UnityPipelineOperationDetails } from "./src/unity-pipeline";
 import {
@@ -83,6 +84,10 @@ type UnityToolDetails = {
   invocation?: UnityBatchmodeInvocation;
   artifacts?: UnityBatchmodeArtifacts;
   parsedTestResults?: UnityParsedTestResults | null;
+  testOutcome?: NormalizedUnityTestResult["outcome"];
+  normalizedResultPath?: string;
+  normalizedResult?: Pick<NormalizedUnityTestResult, "source" | "platform" | "outcome" | "summary"> & { testRecordCount: number };
+  evidenceWarnings?: string[];
   status?: "passed" | "failed" | "killed";
   launcher?: "unity-cli" | "editor-executable";
   cliArgs?: string[];
@@ -178,7 +183,7 @@ const INSPECT_ARTIFACTS_PARAMS = Type.Object({
   testResultsPath: Type.Optional(Type.String({ description: "Unity Test Framework XML results path. Relative paths are resolved against cwd and the Unity project root." })),
   normalizedResultPath: Type.Optional(Type.String({ description: "pi-unity normalized JSON test artifact path." })),
   logFilePath: Type.Optional(Type.String({ description: "Unity log file path. Relative paths are resolved against cwd and the Unity project root." })),
-  latestFromLogs: Type.Optional(Type.Boolean({ default: true, description: "When paths are omitted, inspect the newest .xml and .log files under the project's Logs folder." })),
+  latestFromLogs: Type.Optional(Type.Boolean({ default: true, description: "Only when all artifact paths are omitted, inspect the newest .json, .xml and .log files under Logs. Latest files are not proof of a shared run." })),
   maxLines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 60, description: "Maximum log/output lines to include." })),
   maxChars: Type.Optional(Type.Integer({ minimum: 500, maximum: 20000, default: 6000, description: "Maximum log/output characters to include." })),
 });
@@ -705,7 +710,8 @@ async function buildArtifactInspectionReport(
   candidate: UnityProjectCandidate,
   params: { testResultsPath?: string; normalizedResultPath?: string; logFilePath?: string; latestFromLogs?: boolean; maxLines?: number; maxChars?: number },
 ): Promise<{ text: string; details: UnityToolDetails }> {
-  const useLatest = params.latestFromLogs !== false;
+  // An exact artifact request must not silently recruit unrelated latest evidence.
+  const useLatest = params.latestFromLogs !== false && ![params.testResultsPath, params.logFilePath, params.normalizedResultPath].some(value => value?.trim());
   const logsRoot = join(candidate.projectRoot, "Logs");
   const testResultsPath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.testResultsPath)
     ?? (useLatest ? await findNewestFile(logsRoot, [".xml"]) : undefined);
@@ -713,12 +719,16 @@ async function buildArtifactInspectionReport(
     ?? (useLatest ? await findNewestFile(logsRoot, [".log", ".txt"]) : undefined);
   const normalizedResultPath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.normalizedResultPath)
     ?? (useLatest ? await findNewestFile(logsRoot, [".json"]) : undefined);
-  let normalizedSummary: string | undefined;
+  let normalized: NormalizedUnityTestResult | undefined;
+  const evidenceErrors: string[] = [];
+  const evidenceWarnings: string[] = [];
   if (normalizedResultPath) {
     try {
-      const normalized = JSON.parse(await readFile(normalizedResultPath, "utf8")) as Partial<NormalizedUnityTestResult>;
-      if (normalized.schemaVersion === 1 && typeof normalized.outcome === "string") normalizedSummary = `Normalized test result: ${normalized.platform ?? "Unity"} ${normalized.outcome}; ${normalized.summary?.total ?? "unknown"} total.`;
-    } catch { normalizedSummary = `Normalized test result JSON could not be parsed: ${normalizedResultPath}`; }
+      if ((await stat(normalizedResultPath)).size > UNITY_TEST_MAX_ARTIFACT_BYTES) throw new Error("Normalized artifact exceeds its size limit.");
+      normalized = validateNormalizedUnityTestArtifact(JSON.parse(await readFile(normalizedResultPath, "utf8")));
+    } catch (error) {
+      evidenceErrors.push(`Normalized test result could not be loaded/validated: ${normalizedResultPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   const invocation: UnityBatchmodeInvocation = {
     isTestRun: Boolean(testResultsPath),
@@ -731,16 +741,50 @@ async function buildArtifactInspectionReport(
   if (testResultsPath && artifacts.testResultsXml && !parsedTestResults) {
     artifacts.warnings.push(`Unity test results XML could not be parsed: ${artifacts.testResultsPath ?? testResultsPath}`);
   }
-  const hasLoadedArtifacts = Boolean(artifacts.testResultsPath || artifacts.logFilePath);
-  const status = deriveUnityArtifactInspectionStatus(hasLoadedArtifacts, invocation, parsedTestResults);
+  if (testResultsPath && !parsedTestResults) evidenceErrors.push(`Requested XML evidence is missing or malformed: ${testResultsPath}`);
+  if (parsedTestResults) {
+    const counts = [parsedTestResults.total, parsedTestResults.passed, parsedTestResults.failed, parsedTestResults.skipped, parsedTestResults.inconclusive];
+    if (counts.some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+      || (parsedTestResults.total !== undefined && ((parsedTestResults.passed ?? 0) + (parsedTestResults.failed ?? 0) > parsedTestResults.total || counts.slice(1).some(value => value !== undefined && value > parsedTestResults.total!)))) {
+      evidenceErrors.push("Conflicting XML evidence: invalid or inconsistent counts.");
+    }
+  }
+  if (logFilePath && artifacts.logText === undefined) evidenceErrors.push(`Requested log evidence is missing: ${logFilePath}`);
+  const hasLoadedArtifacts = Boolean(normalized || parsedTestResults || artifacts.logText !== undefined);
+  if (!hasLoadedArtifacts) evidenceErrors.push("No valid Unity artifacts were loaded.");
+  let testOutcome = normalized?.outcome ?? (parsedTestResults ? determineUnityTestOutcome({ ...parsedTestResults, failed: parsedTestResults.failedTests.length > 0 ? Math.max(1, parsedTestResults.failed ?? 0) : parsedTestResults.failed }) : undefined);
+  if (normalized && parsedTestResults) {
+    for (const key of ["total", "passed", "failed", "skipped", "inconclusive"] as const) {
+      if (normalized.summary[key] !== undefined && parsedTestResults[key] !== undefined && normalized.summary[key] !== parsedTestResults[key]) evidenceErrors.push(`Conflicting normalized/XML evidence: ${key} differs.`);
+    }
+    if ((normalized.outcome === "passed" || normalized.outcome === "passed_with_flakes") && parsedTestResults.failedTests.length > 0) evidenceErrors.push("Conflicting normalized/XML evidence: XML contains failed tests.");
+    const linkedXml = normalized.backendArtifacts?.nunit;
+    if (linkedXml && resolve(candidate.projectRoot, linkedXml) !== resolve(testResultsPath!)) evidenceErrors.push("Conflicting artifact identity: selected XML is not the normalized artifact's nunit path.");
+    if (!linkedXml) {
+      evidenceWarnings.push("Normalized JSON and XML have no shared run identity; matching counts alone do not correlate these files.");
+      testOutcome = "uncertain";
+    }
+  }
+  if (useLatest) evidenceWarnings.push("Latest artifact selection does not establish current-run identity; use exact paths for a particular run.");
+  if (evidenceErrors.length) testOutcome = "uncertain";
+  // Inspection succeeded even when valid evidence reports test failure or uncertainty.
+  const status = evidenceErrors.length ? "failed" : "passed";
   const lines = [
     `Unity artifacts inspected for ${formatPathForUser(ctx.cwd, candidate.projectRoot)}; Unity CLI selects the project's declared Editor version when launching.`,
     testResultsPath ? `Requested test results: ${testResultsPath}` : "Requested test results: (none found)",
     logFilePath ? `Requested log file: ${logFilePath}` : "Requested log file: (none found)",
     normalizedResultPath ? `Requested normalized result: ${normalizedResultPath}` : "Requested normalized result: (none found)",
-    ...(normalizedSummary ? [normalizedSummary] : []),
+    `Inspection: ${status}. Test outcome: ${testOutcome ?? "not established (log only)"}.`,
+    ...(normalized ? [compactUnityTestSummary(normalized), `Normalized source: ${normalized.source}; selection (bounded): ${summarizeTextForAgent(JSON.stringify(normalized.selection), 1, 2000)}; ${normalized.tests.length} retained test record(s).`] : []),
+    ...evidenceErrors,
+    ...evidenceWarnings,
   ];
 
+  if (normalized) {
+    for (const test of normalized.tests.filter(test => !["passed", "success"].includes(test.status.toLowerCase())).slice(0, 8)) {
+      lines.push(`- ${test.name.slice(0, 1000)}: ${test.status.slice(0, 100)}${test.message ? ` — ${test.message.slice(0, 1000)}` : ""}`);
+    }
+  }
   if (parsedTestResults) {
     lines.push(...formatParsedTestResultsForAgent(parsedTestResults));
   }
@@ -767,6 +811,10 @@ async function buildArtifactInspectionReport(
       artifacts: compactUnityArtifacts(artifacts),
       parsedTestResults,
       status,
+      testOutcome,
+      normalizedResultPath,
+      normalizedResult: normalized ? { source: normalized.source, platform: normalized.platform, outcome: normalized.outcome, summary: { total: normalized.summary.total, passed: normalized.summary.passed, failed: normalized.summary.failed, skipped: normalized.summary.skipped, inconclusive: normalized.summary.inconclusive }, testRecordCount: normalized.tests.length } : undefined,
+      evidenceWarnings,
     },
   };
 }
@@ -1689,13 +1737,13 @@ export default function freeUnityPi(pi: ExtensionAPI) {
   pi.registerTool({
     name: "unity_inspect_artifacts",
     label: "Unity Inspect Artifacts",
-    description: "Summarize existing Unity log files and Unity Test Framework XML results without launching Unity.",
-    promptSnippet: "Inspect existing Unity logs or test result XML files without launching Unity.",
+    description: "Inspect existing Unity normalized JSON, Test Framework XML and logs without launching Unity. Inspection success is separate from test outcome.",
+    promptSnippet: "Inspect existing Unity normalized test evidence, XML or logs without launching Unity.",
     promptGuidelines: [
       "Use unity_inspect_artifacts after Unity failures when existing -testResults or -logFile artifacts need concise parsing without another Unity launch.",
       "Prefer unity_inspect_artifacts over ad hoc bash parsing of Unity XML/log files when paths are known or Logs/ contains recent artifacts.",
       "unity_inspect_artifacts does not launch Unity and is safe to use even when the Unity project is busy.",
-      "Treat selected test XML as passing evidence only when it is well formed, reports a known positive executed-test count, and reports no failures.",
+      "Inspect details.testOutcome, not inspection status, for test success. Passing evidence needs consistent positive passing counts; missing explicit paths and conflicting artifacts fail inspection. Latest files are not current-run identity.",
     ],
     parameters: INSPECT_ARTIFACTS_PARAMS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {

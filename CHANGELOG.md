@@ -7,6 +7,10 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+### Fixed
+
+- Validate normalized JSON test artifacts as standalone inspection evidence, separate inspection success from test outcome, and reject missing explicit paths or conflicting artifacts without substituting unrelated latest logs.
+
 ## 0.12.0 - 2026-08-27
 
 ### Changed
