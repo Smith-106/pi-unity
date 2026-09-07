@@ -298,6 +298,94 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     await rm(root, { recursive: true, force: true });
   }
 }
+// Execute the published serial recipe through registered tools and Pi's native
+// finalizer. The continuation decision below is scripted, not model behavior.
+{
+  const skill = await readFile(new URL("../skills/unity-pipeline-workflows/SKILL.md", import.meta.url), "utf8");
+  const recipe = [...skill.matchAll(/```json\r?\n([^`]+)\r?\n```/g)].map(match => JSON.parse(match[1]!));
+  assert.equal(recipe.length, 2);
+  assert.deepEqual(recipe.map(params => params.testFilters), [["Synthetic.InventoryFixture"], ["Synthetic.DialogueFixture"]], "The recipe must not duplicate or broaden fixtures.");
+  assert(recipe.every(params => params.path === "./SyntheticGame" && params.testPlatform === "EditMode" && params.execution === "connected" && !params.testCategories));
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-selector-recipe-"));
+  try {
+    const project = join(root, "SyntheticGame");
+    await mkdir(join(project, "ProjectSettings"), { recursive: true });
+    await mkdir(join(project, "Packages"));
+    await writeFile(join(project, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
+    await writeFile(join(project, "Packages", "manifest.json"), '{"dependencies":{"com.unity.pipeline":"0.3.0-exp.1"}}');
+    const canonical = await realpath(project);
+    for (const scenario of ["passed", "malformed", "timeout", "displaced", "zero", "active"] as const) {
+      const commands: string[][] = [];
+      const pi = fakePi(async (_command, args) => {
+        if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+        const response = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
+        if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+        if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+        commands.push(args);
+        const command = args[args.indexOf("--timeout") + 2];
+        if (command === "editor_status") return response({ status: "ready", playMode: "stopped" });
+        if (command === "test_status") return response({ status: scenario === "active" ? "running" : "no_tests" });
+        assert.equal(command, "run_tests", "No Editor closure, launch, fallback or lifecycle dispatch is permitted.");
+        if (scenario === "malformed") return { code: 0, stdout: "not JSON", stderr: "" };
+        if (scenario === "timeout") return { code: null, killed: true, stdout: "", stderr: "" };
+        const filter = args[args.indexOf("--filter") + 1];
+        const total = scenario === "zero" ? 0 : 1;
+        return response({ status: "completed", mode: "editor", filter: scenario === "displaced" ? "Synthetic.Unrelated" : filter, summary: { total, passed: total, failed: 0 }, tests: total ? [{ name: `${filter}.One`, result: "Passed" }] : [] });
+      });
+      registerUnity(pi as any);
+      const tool = pi.tools.find(item => item.name === "unity_run_tests");
+      const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
+      assert.match(tool.parameters.properties.testFilters.description, /one test-name selector/);
+      assert.match(tool.parameters.properties.testCategories.description, /one category/);
+      assert.match(tool.promptGuidelines.join(" "), /Stop the remaining sequence/);
+      const results: any[] = [];
+      for (const params of recipe) {
+        const result = await nativeToolResult(pi, tool, params, ctx);
+        results.push(result);
+        if (result.isError || result.details?.testResult?.outcome !== "passed") break;
+        assert.equal(result.details.route, "connected");
+        const artifact = JSON.parse(await readFile(join(project, result.details.artifactPath), "utf8"));
+        assert.deepEqual(artifact.selection, { testFilters: params.testFilters, testCategories: [] });
+        assert.equal(artifact.summary.total, 1);
+        assert.deepEqual(artifact.tests.map((test: any) => test.name), [`${params.testFilters[0]}.One`]);
+      }
+      const runs = commands.filter(args => args.includes("run_tests"));
+      assert.equal(results.length, scenario === "passed" ? 2 : 1, `${scenario}: scripted recipe stops remaining calls`);
+      assert.equal(runs.length, scenario === "passed" ? 2 : scenario === "active" ? 0 : 1, `${scenario}: no automatic second dispatch or retry`);
+      assert.deepEqual(runs.map(args => args[args.indexOf("--filter") + 1]), recipe.slice(0, runs.length).map(params => params.testFilters[0]));
+      assert(runs.every(args => args[args.indexOf("--filter_type") + 1] === "testName"));
+      if (scenario !== "passed") assert.equal(results[0].isError, true, `${scenario}: native failure`);
+      else {
+        assert.notEqual(results[0].details.artifactPath, results[1].details.artifactPath);
+        for (const execution of ["auto", "connected"]) {
+          for (const selection of [
+            { testFilters: ["Synthetic.InventoryFixture", "Synthetic.DialogueFixture"] },
+            { testCategories: ["SyntheticA", "SyntheticB"] },
+            { testFilters: ["Synthetic.InventoryFixture"], testCategories: ["SyntheticA"] },
+          ]) {
+            const before = commands.length;
+            const rejection = await nativeToolResult(pi, tool, { path: project, testPlatform: "EditMode", execution, ...selection }, ctx);
+            assert.equal(rejection.isError, true);
+            assert.match(rejection.content[0].text, /No tests were dispatched/);
+            assert.match(rejection.content[0].text, /separate execution: "connected" calls/);
+            assert.match(rejection.content[0].text, /Do not split a mixed/);
+            assert.equal(commands.length, before, "Rejected selectors never reach operation or lifecycle commands.");
+          }
+        }
+        const before = commands.length;
+        const semicolon = await nativeToolResult(pi, tool, { ...recipe[0], testFilters: ["Synthetic.A;Synthetic.B"] }, ctx);
+        assert.equal(semicolon.isError, true);
+        assert.match(semicolon.content[0].text, /semicolons/);
+        assert.equal(commands.length, before);
+        const category = await nativeToolResult(pi, tool, { path: project, testPlatform: "EditMode", execution: "connected", testCategories: ["SyntheticCategory"] }, ctx);
+        assert.equal(category.isError, false);
+        const categoryRun = commands.filter(args => args.includes("run_tests")).at(-1)!;
+        assert.equal(categoryRun[categoryRun.indexOf("--filter_type") + 1], "category");
+        assert.equal(categoryRun[categoryRun.indexOf("--filter") + 1], "SyntheticCategory");
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
 {
   const root = await mkdtemp(join(tmpdir(), "pi-unity-native-failure-"));
   try {

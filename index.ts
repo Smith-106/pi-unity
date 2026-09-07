@@ -124,11 +124,13 @@ const LAUNCH_BATCHMODE_PARAMS = Type.Object({
   closeBlockingUnityProcess: Type.Optional(Type.Boolean({ default: false, description: "When true, pi-unity may close a running Unity process for the resolved project before launch, but only if piUnity.allowCloseRunningUnityProcess is enabled in Pi settings. The process is selected by project matching, not by model-supplied PID." })),
 }, { additionalProperties: false });
 
+const CONNECTED_TEST_SELECTOR_GUIDANCE = 'unity_run_tests connected execution supports one testFilters entry OR one testCategories entry per call. For independent, non-overlapping selections, use separate execution: "connected" calls with the same explicit path and platform; await and inspect each passing result before issuing the next. Stop the remaining sequence on failure or uncertainty; never retry, broaden the selection, close the Editor, or switch routes automatically. Do not split a mixed filter/category intersection into separate runs.';
+
 const RUN_TESTS_PARAMS = Type.Object({
   path: Type.Optional(Type.String({ description: "Unity project path, workspace copy root, or folder containing project copies." })),
   testPlatform: StringEnum(["EditMode", "PlayMode"] as const),
-  testFilters: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
-  testCategories: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
+  testFilters: Type.Optional(Type.Array(Type.String(), { maxItems: 50, description: "Connected: one test-name selector only; omit testCategories. For two independent fixtures, issue serial single-selector calls, inspecting each result first. No semicolon lists. Omitted/empty selectors select all tests, not a repair for rejected filters." })),
+  testCategories: Type.Optional(Type.Array(Type.String(), { maxItems: 50, description: "Connected: one category only; omit testFilters. Multiple categories require separate non-overlapping selections or deliberate isolated execution; never split a filter/category intersection into separate runs." })),
   execution: Type.Optional(StringEnum(["auto", "connected", "isolated"] as const, { default: "auto" })),
   isolatedLauncher: Type.Optional(StringEnum(["auto", "unity-cli", "editor-executable"] as const, { default: "auto" })),
   retries: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, default: 0 })),
@@ -1202,14 +1204,14 @@ async function runUnifiedUnityTests(
   const busy = (await listBlockingUnityProcesses(candidate.projectRoot)).processes.length > 0 || capabilities.matchingInstances.length > 0;
   let route: "connected" | "isolated";
   if (request.execution === "connected") {
-    if (requirements.requiresIsolation) throw new Error(`Connected execution cannot honor this request: ${requirements.reasons.join("; ")}.`);
+    if (requirements.requiresIsolation) throw new Error(`Connected execution cannot honor this request: ${requirements.reasons.join("; ")}. No tests were dispatched. ${CONNECTED_TEST_SELECTOR_GUIDANCE} Other isolated-only options still require a deliberate isolated-execution decision.`);
     if (!reachable) throw new Error("Connected execution requires an already-open exact-copy reachable Pipeline Editor; no Unity was launched.");
     route = "connected";
   } else if (request.execution === "isolated") {
     if (reachable && !request.closeBlockingUnityProcess) throw new Error("Isolated execution will not close a reachable Pipeline Editor automatically. Close it first or use the explicitly guarded close option.");
     route = "isolated";
   } else if (reachable) {
-    if (requirements.requiresIsolation) throw new Error(`This request requires isolated execution (${requirements.reasons.join("; ")}), but the exact project copy is open in reachable Pipeline. pi-unity will not close it automatically.`);
+    if (requirements.requiresIsolation) throw new Error(`This request requires isolated execution (${requirements.reasons.join("; ")}), but the exact project copy is open in reachable Pipeline. pi-unity will not close it automatically. No tests were dispatched. ${CONNECTED_TEST_SELECTOR_GUIDANCE} Other isolated-only options still require a deliberate isolated-execution decision.`);
     route = "connected";
   } else {
     if (capabilities.pipelineDiscovery === "timeout" || (capabilities.projectSupportsPipeline && capabilities.pipelineDiscovery !== "absent" && capabilities.pipelineDiscovery !== "available")) throw new Error("Pipeline discovery is uncertain for this exact project copy; refusing to start an isolated Editor until project state is known.");
@@ -1607,6 +1609,7 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     promptSnippet: "Run Unity EditMode or PlayMode tests through one safe routed workflow with durable normalized evidence.",
     promptGuidelines: [
       "Use unity_run_tests for ordinary Unity Test Framework runs. It selects connected Pipeline only for compatible requests and isolated unity test only when the exact project copy is closed.",
+      CONNECTED_TEST_SELECTOR_GUIDANCE,
       "Do not use unity_launch_batchmode for ordinary tests; raw test flags there are an unsupported escape hatch.",
       "A reachable Editor is never closed merely to obtain isolated-only options. Requests needing retries, sharding, reruns, coverage, multiple selectors, or XML reports are rejected before dispatch when it is open.",
       "Timeout, malformed evidence, cancellation, or missing artifacts never cause a backend fallback or relaunch.",

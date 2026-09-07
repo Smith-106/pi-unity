@@ -9,6 +9,7 @@ and this project follows semantic versioning for public package releases.
 
 ### Fixed
 
+- Clarify connected single-selector arguments and pre-dispatch rejection recipes; document serial independent-fixture calls with stop-on-uncertainty boundaries, backed by offline registered-tool contract tests (not model-planning or live-Editor evidence).
 - Validate normalized JSON test artifacts as standalone inspection evidence, separate inspection success from test outcome, and reject missing explicit paths or conflicting artifacts without substituting unrelated latest logs.
 - Mark rejected Pipeline eval and inspection as native Pi tool failures while retaining structured diagnostics and uncertain post-dispatch effects, without retry or fallback.
 - Reject contradictory combined XML counters and test-record evidence during artifact inspection, including self-closing failures and records beyond the display limit; keep skipped and inconclusive counters distinct and preserve valid partial records.
