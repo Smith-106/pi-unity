@@ -1,11 +1,14 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import registerProjectArtifacts from "@aefree/pi-project-artifacts/pi";
 import { resolveArtifactProfilesV1, resolveArtifactSearchServiceV1, resolveTodoLifecycleServiceV1 } from "@aefree/pi-project-artifacts/contracts/v1";
 import { resolveFileDiscoveryFiltersV1 } from "@aefree/pi-file-discovery/contracts/v1";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner, initTheme } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import registerUnity from "../index";
 import { writeNormalizedUnityTestArtifact, type NormalizedUnityTestResult } from "../src/unity-tests";
 
@@ -30,6 +33,42 @@ function fakePi(exec: (command: string, args: string[]) => Promise<any> = async 
   };
 }
 async function emit(pi: ReturnType<typeof fakePi>, name: string, ctx: any) { for (const handler of pi.handlers.get(name) ?? []) await handler({ reason: name === "session_start" ? "startup" : "quit" }, ctx); }
+
+// Exercise Pi's actual native finalizer and extension middleware, not an imitation
+// that treats execute().details.status (or a returned isError field) as failure.
+// Resolve agent-core through the installed host so this works with nested npm deps.
+const hostRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const coreManifestPath = hostRequire.resolve("@earendil-works/pi-agent-core/package.json");
+const coreManifest = JSON.parse(await readFile(coreManifestPath, "utf8"));
+const { runAgentLoop } = await import(new URL(coreManifest.exports["."].import, pathToFileURL(coreManifestPath)).href);
+async function nativeToolResult(pi: ReturnType<typeof fakePi>, tool: any, params: any, ctx: any) {
+  const runner = new ExtensionRunner([{ path: "synthetic-unity-extension", handlers: pi.handlers } as any], {} as any, ctx.cwd, ctx.sessionManager, {} as any);
+  const errors: unknown[] = [];
+  runner.onError(error => errors.push(error));
+  const events: any[] = [];
+  let executed: any;
+  const messages = await runAgentLoop([], { systemPrompt: "Offline deterministic tool-result test", messages: [], tools: [{ ...tool, execute: async (...args: any[]) => { executed = await tool.execute(...args, ctx); return executed; } }] }, {
+    model: { id: "synthetic", provider: "synthetic", api: "openai-completions" },
+    convertToLlm: (messages: any[]) => messages,
+    shouldStopAfterTurn: () => true,
+    afterToolCall: ({ toolCall, args, result, isError }: any) => runner.emitToolResult({ type: "tool_result", toolName: toolCall.name, toolCallId: toolCall.id, input: args, content: result.content, details: result.details, isError }),
+  }, (event: any) => { events.push(event); }, undefined, () => {
+    const stream = createAssistantMessageEventStream();
+    const response = { role: "assistant", content: [{ type: "toolCall", id: "synthetic-call", name: tool.name, arguments: params }], api: "openai-completions", provider: "synthetic", model: "synthetic", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: 0 };
+    stream.push({ type: "done", reason: "toolUse", message: response });
+    stream.end(response);
+    return stream;
+  });
+  assert.deepEqual(errors, [], "Native extension hooks must not fail silently.");
+  const result = messages.find((message: any) => message.role === "toolResult");
+  assert(result, "Native finalizer emitted a tool result.");
+  assert.equal(events.find(event => event.type === "tool_execution_end")?.isError, result.isError, "Native execution event and stored result agree.");
+  if (executed) {
+    assert.deepEqual(result.details, executed.details, "Native failure must retain structured details unchanged.");
+    assert.deepEqual(result.content, executed.content, "Native failure must retain bounded diagnostics unchanged.");
+  }
+  return result;
+}
 
 for (const order of ["artifacts-first", "unity-first"] as const) {
   const scope = {};
@@ -258,6 +297,60 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+{
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-native-failure-"));
+  try {
+    await mkdir(join(root, "ProjectSettings"));
+    await mkdir(join(root, "Packages"));
+    await writeFile(join(root, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
+    await writeFile(join(root, "Packages", "manifest.json"), '{"dependencies":{"com.unity.pipeline":"0.3.0-exp.1"}}');
+    const project = await realpath(root);
+    const ctx = { cwd: project, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
+    for (const name of ["unity_pipeline_eval", "unity_pipeline_inspect"]) {
+      for (const scenario of ["success", "identity", "unadvertised", "dispatch-failed", "timeout", "thrown-timeout", "malformed", "reported-failure"]) {
+        const calls: string[][] = [];
+        let discoveries = 0;
+        const command = name === "unity_pipeline_eval" ? "eval" : "get_authoring_root";
+        const pi = fakePi(async (_command, args) => {
+          calls.push(args);
+          if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+          if (args.includes("pipeline") && args.includes("list")) {
+            discoveries++;
+            return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: project, pid: scenario === "identity" && discoveries > 1 ? 43 : 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+          }
+          if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: scenario === "unadvertised" ? ["editor_status"] : [command] } }), stderr: "" };
+          assert.equal(args[args.indexOf("--timeout") + 2], command, "Only the selected command may dispatch.");
+          if (scenario === "dispatch-failed") return { code: 1, stdout: "", stderr: "Synthetic dispatch error" };
+          if (scenario === "timeout") return { code: null, killed: true, stdout: "", stderr: "" };
+          if (scenario === "thrown-timeout") throw Object.assign(new Error("Synthetic timeout"), { code: "ETIMEDOUT" });
+          if (scenario === "malformed") return { code: 0, stdout: "not JSON", stderr: "" };
+          if (scenario === "reported-failure") return { code: 0, stdout: JSON.stringify({ success: true, data: { success: false, result: { success: false, diagnostics: [{ severity: "Error", message: "Synthetic diagnostic" }] } } }), stderr: "" };
+          return { code: 0, stdout: JSON.stringify({ success: true, data: { result: { success: true, result: 42, diagnostics: [] } } }), stderr: "" };
+        });
+        registerUnity(pi as any);
+        const tool = pi.tools.find(item => item.name === name);
+        const result = await nativeToolResult(pi, tool, { path: project, ...(command === "eval" ? { code: "return 42;", timeoutSeconds: 12 } : { command }) }, ctx);
+        assert.equal(result.isError, scenario !== "success", `${name}/${scenario} native failure`);
+        const detail = command === "eval" ? result.details.pipelineEval : result.details.pipelineInspection;
+        assert.equal(detail.outcome, scenario === "success" ? "dispatched" : "rejected");
+        const expectedCode = { identity: "unity_project_identity_changed", unadvertised: "planning_command_unadvertised", "dispatch-failed": "planning_command_failed", timeout: "planning_command_timeout", "thrown-timeout": "planning_command_timeout", malformed: "planning_command_malformed", "reported-failure": "planning_command_reported_failure" }[scenario];
+        if (expectedCode) assert.equal(detail.code, expectedCode, `${name}/${scenario} structured reason`);
+        if (["timeout", "thrown-timeout", "dispatch-failed"].includes(scenario)) assert.match(detail.message, /effect may be uncertain/, "Failure after dispatch never implies no mutation occurred.");
+        if (scenario === "reported-failure") assert.match(detail.message, /Synthetic diagnostic/);
+        const dispatches = calls.filter(args => args.includes("command") && !args.includes("list"));
+        assert.equal(dispatches.length, ["identity", "unadvertised"].includes(scenario) ? 0 : 1, `${name}/${scenario}: zero retry or fallback`);
+        assert(calls.every(args => !args.some(arg => ["open", "run", "test", "Exit", "editor_stop"].includes(arg))), "No lifecycle, launch, test or fallback commands.");
+      }
+    }
+    const pi = fakePi();
+    registerUnity(pi as any);
+    const hook = pi.handlers.get("tool_result")![0];
+    const rejection = { mode: "pipeline_eval", pipelineEval: { outcome: "rejected", code: "synthetic", message: "synthetic" } };
+    assert.equal(await hook({ toolName: "unrelated_tool", details: rejection, isError: false }, ctx), undefined, "Other tools are not classified by Unity-shaped content.");
+    assert.equal(await hook({ toolName: "unity_pipeline_eval", details: { ...rejection, mode: "unrelated" }, isError: false }, ctx), undefined);
+    assert.equal(await hook({ toolName: "unity_pipeline_eval", details: undefined, isError: true }, ctx), undefined, "Existing thrown failures are never cleared.");
+  } finally { await rm(root, { recursive: true, force: true }); }
 }
 {
   const root = await mkdtemp(join(tmpdir(), "pi-unity-artifact-contract-"));

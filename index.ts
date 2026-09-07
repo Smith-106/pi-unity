@@ -1381,6 +1381,17 @@ function formatUnityGuidanceAudit(result: UnityGuidanceAuditResult): string {
 }
 
 export default function freeUnityPi(pi: ExtensionAPI) {
+  // Pi's documented tool_result patch marks native failure without discarding the
+  // structured rejection details (throwing from execute retains only error text).
+  // A top-level isError property returned from execute is NOT a native error.
+  pi.on("tool_result", (event) => {
+    const details = event.details as UnityToolDetails | undefined;
+    if ((event.toolName === "unity_pipeline_eval" && details?.mode === "pipeline_eval" && details.pipelineEval?.outcome === "rejected")
+      || (event.toolName === "unity_pipeline_inspect" && details?.mode === "pipeline_inspection" && details.pipelineInspection?.outcome === "rejected")) {
+      return { isError: true };
+    }
+  });
+
   type ScopeRegistrations = Readonly<{
     artifactProfile?: Readonly<{ registry: ScopedRegistryV1; token: RegistrationToken }>;
     fileDiscoveryFilter?: Readonly<{ registry: ScopedRegistryV1; token: RegistrationToken }>;

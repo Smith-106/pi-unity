@@ -10,6 +10,7 @@ and this project follows semantic versioning for public package releases.
 ### Fixed
 
 - Validate normalized JSON test artifacts as standalone inspection evidence, separate inspection success from test outcome, and reject missing explicit paths or conflicting artifacts without substituting unrelated latest logs.
+- Mark rejected Pipeline eval and inspection as native Pi tool failures while retaining structured diagnostics and uncertain post-dispatch effects, without retry or fallback.
 
 ## 0.12.0 - 2026-08-27
 

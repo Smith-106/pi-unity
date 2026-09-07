@@ -113,6 +113,8 @@ Another connected client is not a project lock. When Pipeline returns stable cor
 
 Use `unity_pipeline_inspect` when a purpose-built structured command fits. Use eval for bounded project-specific work that matches the user's intent. Prefer typed tools when they provide stronger lifecycle, polling, validation, or recovery semantics.
 
+Rejected eval and inspection results are native Pi tool failures (`isError: true`) via the documented `tool_result` middleware, with structured rejection codes and bounded diagnostics retained. Pre-dispatch rejection does not execute the command; a timeout or dispatch failure can leave effects uncertain and never triggers retry or fallback.
+
 ## Launch and process safeguards
 
 `unity_open_editor` and batchmode tools treat Unity CLI as the authoritative launcher: `unity open`, `unity run`, and `unity test` receive only the selected project and let Unity CLI read `ProjectVersion.txt`. The direct Editor executable is an exceptional compatibility fallback used only when Unity CLI is unavailable. Set `launcher` to `auto`, `unity-cli`, or `editor-executable` when explicit routing is needed.
