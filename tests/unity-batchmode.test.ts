@@ -8,6 +8,7 @@ import {
   deriveUnityBatchmodeStatus,
   formatParsedTestResultsForAgent,
   hasKnownPositiveExecutedTestCount,
+  hasConflictingUnityXmlTestEvidence,
   loadUnityBatchmodeArtifacts,
   parseUnityBatchmodeInvocation,
   parseUnityTestResultsXml,
@@ -55,6 +56,8 @@ assert.equal(parsed?.total, 2);
 assert.equal(parsed?.passed, 2);
 assert.equal(parsed?.failed, 0);
 assert.equal(parsed?.failedTests.length, 0);
+assert.deepEqual(parsed?.tests.map(test => test.name), ["My.Namespace.Tests.PassingTest"], "Self-closing passing records remain visible despite a partial record list.");
+assert.equal(hasConflictingUnityXmlTestEvidence(parsed!), false, "Partial records need not equal the reported total.");
 
 const failedXml = `<?xml version="1.0" encoding="utf-8"?>
 <test-run total="1" passed="0" failed="1" skipped="0" inconclusive="0">
@@ -73,6 +76,22 @@ assert(parsedFailed, "Expected failed Unity test XML to parse.");
 assert.equal(parsedFailed?.failed, 1);
 assert.equal(parsedFailed?.failedTests[0]?.name, "My.Namespace.Tests.FailingTest");
 assert.equal(parsedFailed?.failedTests[0]?.message, "Expected true but was false");
+
+const mixedRecordXml = `<test-run total="3" passed="1" failed="2">
+  <test-case name="Synthetic.SelfClosingFailure" result="Failed" />
+  <test-case name="Synthetic.PairedFailure" result="Failed"><failure><message>Synthetic paired diagnostic</message></failure></test-case>
+  <test-case name="Synthetic.Passing" result="Passed" />
+</test-run>`;
+const mixedRecords = parseUnityTestResultsXml(mixedRecordXml)!;
+assert.deepEqual(mixedRecords.tests.map(test => test.name), ["Synthetic.SelfClosingFailure", "Synthetic.PairedFailure", "Synthetic.Passing"], "A self-closing record cannot swallow its paired neighbor.");
+assert.equal(mixedRecords.failedTests[1]?.message, "Synthetic paired diagnostic");
+assert.deepEqual(mixedRecords.testRecordCounts, { total: 3, passed: 1, failed: 2, skipped: 0, inconclusive: 0, other: 0 });
+assert.equal(hasConflictingUnityXmlTestEvidence(mixedRecords), false);
+const successAttributeFailure = parseUnityTestResultsXml('<test-run total="1" failed="1"><test-case name="Synthetic.Failed" success="False" /></test-run>')!;
+assert.equal(successAttributeFailure.tests[0]?.status, "Failed", "Explicit failure cannot be normalized as an unknown or passing status.");
+const inconclusiveOnly = parseUnityTestResultsXml('<test-run total="1" passed="0" failed="0" inconclusive="1"></test-run>')!;
+assert.equal(inconclusiveOnly.skipped, undefined, "Do not duplicate an inconclusive counter as skipped.");
+assert.equal(hasConflictingUnityXmlTestEvidence(inconclusiveOnly), false, "An inconclusive-only summary must not be double-counted.");
 
 const unknownTotalXml = `<?xml version="1.0" encoding="utf-8"?>
 <test-run passed="1" failed="0">

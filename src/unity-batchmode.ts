@@ -29,6 +29,8 @@ export type UnityParsedTestResults = {
   failedTests: UnityFailedTest[];
   /** Complete bounded per-test evidence for normalized artifacts, never routine tool output. */
   tests: UnityParsedTestCase[];
+  /** Observed XML record lower bounds, counted before record output is truncated. */
+  testRecordCounts?: { total: number; passed: number; failed: number; skipped: number; inconclusive: number; other: number };
 };
 
 export type UnityBatchmodeArtifacts = {
@@ -82,10 +84,10 @@ function decodeXmlText(value: string | undefined): string | undefined {
 
 function parseAttributes(tagSource: string): Record<string, string> {
   const attributes: Record<string, string> = {};
-  const attributeRegex = /(\w[\w:-]*)\s*=\s*"([^"]*)"/g;
+  const attributeRegex = /(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   for (const match of tagSource.matchAll(attributeRegex)) {
     const key = match[1];
-    const value = match[2] ?? "";
+    const value = match[2] ?? match[3] ?? "";
     attributes[key] = value;
   }
   return attributes;
@@ -102,6 +104,12 @@ function parseOptionalNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function parseTestCount(value: string | undefined): number | undefined {
+  // Only omission is unknown. Retain invalid supplied counters as NaN so the
+  // inspection validator rejects them instead of silently treating them as absent.
+  return value === undefined ? undefined : value.trim() ? Number(value) : Number.NaN;
+}
+
 export function parseUnityTestResultsXml(xml: string): UnityParsedTestResults | null {
   const testRunMatch = xml.match(/<test-run\b([^>]*)>/i);
   const testRunCloseIndex = xml.search(/<\/test-run\s*>/i);
@@ -112,38 +120,65 @@ export function parseUnityTestResultsXml(xml: string): UnityParsedTestResults | 
   const rootAttributes = parseAttributes(testRunMatch[1] ?? "");
   const failedTests: UnityFailedTest[] = [];
   const tests: UnityParsedTestCase[] = [];
+  const testRecordCounts = { total: 0, passed: 0, failed: 0, skipped: 0, inconclusive: 0, other: 0 };
 
-  const testCaseRegex = /<test-case\b([^>]*)>([\s\S]*?)<\/test-case>/gi;
+  // Match the self-closing alternative first so it cannot consume the body of
+  // the next paired record. Both forms carry authoritative failure evidence.
+  const testCaseRegex = /<test-case\b([^>]*?)(?:\/\s*>|>([\s\S]*?)<\/test-case\s*>)/gi;
   for (const match of xml.matchAll(testCaseRegex)) {
     const attributes = parseAttributes(match[1] ?? "");
     const body = match[2] ?? "";
     const result = String(attributes.result ?? attributes.label ?? "").toLowerCase();
     const success = String(attributes.success ?? "").toLowerCase();
     const isFailure = result === "failed" || success === "false";
+    const status = isFailure ? "Failed" : attributes.result ?? attributes.label ?? "Unknown";
+    const statusKey = isFailure ? "failed" : result === "passed" || result === "success" ? "passed" : result === "skipped" ? "skipped" : result === "inconclusive" ? "inconclusive" : "other";
+    testRecordCounts.total++;
+    testRecordCounts[statusKey]++;
     const failureMessage = body.match(/<message[^>]*>([\s\S]*?)<\/message>/i);
     const stackTrace = body.match(/<stack-trace[^>]*>([\s\S]*?)<\/stack-trace>/i);
     const name = truncateEvidence(attributes.fullname ?? attributes.name ?? "(unknown test)", 1_000) ?? "(unknown test)";
-    if (tests.length < 2_000) tests.push({ name, status: attributes.result ?? attributes.label ?? "Unknown", ...(parseOptionalNumber(attributes.duration) === undefined ? {} : { durationSeconds: parseOptionalNumber(attributes.duration) }), ...(truncateEvidence(decodeXmlText(failureMessage?.[1]), 4_000) ? { message: truncateEvidence(decodeXmlText(failureMessage?.[1]), 4_000) } : {}), ...(truncateEvidence(decodeXmlText(stackTrace?.[1]), 8_000) ? { stackTrace: truncateEvidence(decodeXmlText(stackTrace?.[1]), 8_000) } : {}) });
+    if (tests.length < 2_000) tests.push({ name, status, ...(parseOptionalNumber(attributes.duration) === undefined ? {} : { durationSeconds: parseOptionalNumber(attributes.duration) }), ...(truncateEvidence(decodeXmlText(failureMessage?.[1]), 4_000) ? { message: truncateEvidence(decodeXmlText(failureMessage?.[1]), 4_000) } : {}), ...(truncateEvidence(decodeXmlText(stackTrace?.[1]), 8_000) ? { stackTrace: truncateEvidence(decodeXmlText(stackTrace?.[1]), 8_000) } : {}) });
     if (!isFailure) continue;
     if (failedTests.length < 50) failedTests.push({ name, message: truncateEvidence(decodeXmlText(failureMessage?.[1]), 1_000), stackTrace: truncateEvidence(decodeXmlText(stackTrace?.[1]), 4_000) });
   }
 
-  const skipped = parseOptionalNumber(rootAttributes.skipped) ?? parseOptionalNumber(rootAttributes.inconclusive);
+  // These are separate counters. Synthesizing skipped from inconclusive makes
+  // combined-count validation double-count one observed category.
+  const skipped = parseTestCount(rootAttributes.skipped);
 
   const parsed: UnityParsedTestResults = {
-    total: parseOptionalNumber(rootAttributes.total) ?? parseOptionalNumber(rootAttributes.testcasecount),
-    passed: parseOptionalNumber(rootAttributes.passed),
-    failed: parseOptionalNumber(rootAttributes.failed),
+    total: parseTestCount(rootAttributes.total) ?? parseTestCount(rootAttributes.testcasecount),
+    passed: parseTestCount(rootAttributes.passed),
+    failed: parseTestCount(rootAttributes.failed),
     skipped,
-    inconclusive: parseOptionalNumber(rootAttributes.inconclusive),
+    inconclusive: parseTestCount(rootAttributes.inconclusive),
     durationSeconds: parseOptionalNumber(rootAttributes.duration),
     failedTests,
     tests,
+    testRecordCounts,
   };
   if (parsed.total === undefined && parsed.passed === undefined && parsed.failed === undefined && parsed.failedTests.length === 0) {
     return null;
   }
   return parsed;
+}
+
+/** Missing counters and omitted/bounded records are unknown, not zero executions.
+ * Supplied counters and observed record lower bounds must nevertheless agree.
+ * An optional linked summary can fill missing XML counters, not replace them.
+ */
+export function hasConflictingUnityXmlTestEvidence(
+  results: UnityParsedTestResults,
+  linkedSummary?: Pick<UnityParsedTestResults, "total" | "passed" | "failed" | "skipped" | "inconclusive">,
+): boolean {
+  const keys = ["total", "passed", "failed", "skipped", "inconclusive"] as const;
+  const counts = Object.fromEntries(keys.map(key => [key, results[key] ?? linkedSummary?.[key]])) as Pick<UnityParsedTestResults, typeof keys[number]>;
+  if (keys.some(key => counts[key] !== undefined && (!Number.isSafeInteger(counts[key]) || counts[key]! < 0))) return true;
+  const observed = results.testRecordCounts;
+  if (keys.some(key => counts[key] !== undefined && (observed?.[key] ?? 0) > counts[key]!)) return true;
+  const accounted = keys.slice(1).reduce((sum, key) => sum + Math.max(counts[key] ?? 0, observed?.[key] ?? 0), 0);
+  return counts.total !== undefined && accounted > counts.total;
 }
 
 function buildArtifactCandidates(cwd: string, projectRoot: string, rawPath: string): string[] {

@@ -9,6 +9,7 @@ import {
   buildUnityBatchmodeAgentText,
   deriveUnityBatchmodeStatus,
   hasKnownPositiveExecutedTestCount,
+  hasConflictingUnityXmlTestEvidence,
   loadUnityBatchmodeArtifacts,
   parseUnityBatchmodeInvocation,
   parseUnityTestResultsXml,
@@ -742,18 +743,15 @@ async function buildArtifactInspectionReport(
     artifacts.warnings.push(`Unity test results XML could not be parsed: ${artifacts.testResultsPath ?? testResultsPath}`);
   }
   if (testResultsPath && !parsedTestResults) evidenceErrors.push(`Requested XML evidence is missing or malformed: ${testResultsPath}`);
-  if (parsedTestResults) {
-    const counts = [parsedTestResults.total, parsedTestResults.passed, parsedTestResults.failed, parsedTestResults.skipped, parsedTestResults.inconclusive];
-    if (counts.some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0))
-      || (parsedTestResults.total !== undefined && ((parsedTestResults.passed ?? 0) + (parsedTestResults.failed ?? 0) > parsedTestResults.total || counts.slice(1).some(value => value !== undefined && value > parsedTestResults.total!)))) {
-      evidenceErrors.push("Conflicting XML evidence: invalid or inconsistent counts.");
-    }
+  if (parsedTestResults && hasConflictingUnityXmlTestEvidence(parsedTestResults)) {
+    evidenceErrors.push("Conflicting XML evidence: invalid or inconsistent counts/records.");
   }
   if (logFilePath && artifacts.logText === undefined) evidenceErrors.push(`Requested log evidence is missing: ${logFilePath}`);
   const hasLoadedArtifacts = Boolean(normalized || parsedTestResults || artifacts.logText !== undefined);
   if (!hasLoadedArtifacts) evidenceErrors.push("No valid Unity artifacts were loaded.");
   let testOutcome = normalized?.outcome ?? (parsedTestResults ? determineUnityTestOutcome({ ...parsedTestResults, failed: parsedTestResults.failedTests.length > 0 ? Math.max(1, parsedTestResults.failed ?? 0) : parsedTestResults.failed }) : undefined);
   if (normalized && parsedTestResults) {
+    if (hasConflictingUnityXmlTestEvidence(parsedTestResults, normalized.summary)) evidenceErrors.push("Conflicting normalized/XML evidence: combined counts/records disagree.");
     for (const key of ["total", "passed", "failed", "skipped", "inconclusive"] as const) {
       if (normalized.summary[key] !== undefined && parsedTestResults[key] !== undefined && normalized.summary[key] !== parsedTestResults[key]) evidenceErrors.push(`Conflicting normalized/XML evidence: ${key} differs.`);
     }
@@ -764,6 +762,10 @@ async function buildArtifactInspectionReport(
       evidenceWarnings.push("Normalized JSON and XML have no shared run identity; matching counts alone do not correlate these files.");
       testOutcome = "uncertain";
     }
+  }
+  if (parsedTestResults?.testRecordCounts?.other && (testOutcome === "passed" || testOutcome === "passed_with_flakes")) {
+    evidenceWarnings.push("XML contains test records with unknown outcomes; these are not passing evidence.");
+    testOutcome = "uncertain";
   }
   if (useLatest) evidenceWarnings.push("Latest artifact selection does not establish current-run identity; use exact paths for a particular run.");
   if (evidenceErrors.length) testOutcome = "uncertain";

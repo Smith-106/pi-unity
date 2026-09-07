@@ -440,6 +440,69 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const xmlFailure = await inspect({ testResultsPath: xmlPath });
     assert.equal(xmlFailure.details.status, "passed");
     assert.equal(xmlFailure.details.testOutcome, "tests_failed");
+    // Gate1: contradictions must fail in both XML-only and linked JSON/XML inspection.
+    const gateLinked = await artifact({ ...base, source: "unity-cli", summary: { total: 1, passed: 1, failed: 0 }, tests: [], backendArtifacts: { nunit: "Logs/exact.xml" } });
+    const gateOutcomes: string[] = [];
+    for (const contradictoryXml of [
+      '<test-run total="1" passed="1" failed="0" skipped="1"></test-run>',
+      '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.Failed" result="Failed" /></test-run>',
+    ]) {
+      await writeFile(xmlPath, contradictoryXml);
+      for (const mixed of [false, true]) {
+        try {
+          const result = await inspect({ testResultsPath: xmlPath, ...(mixed ? { normalizedResultPath: gateLinked } : {}) });
+          gateOutcomes.push(`${result.details.status}/${result.details.testOutcome}`);
+        } catch (error) {
+          assert.match(String(error), /Conflicting .*evidence/);
+          gateOutcomes.push("rejected");
+        }
+      }
+    }
+    assert.deepEqual(gateOutcomes, ["rejected", "rejected", "rejected", "rejected"], "Both Gate1 counterexamples must reject XML-only and linked mixed inspection.");
+
+    for (const contradictoryXml of [
+      '<test-run total="1" passed="1" failed="0" inconclusive="1"></test-run>',
+      '<test-run total="1" passed="1" failed="0" skipped="not-a-count"></test-run>',
+      '<test-run total="1" passed="1" failed="0" skipped=""></test-run>',
+      `<test-run total="1" passed="1" failed="0"><test-case name='Synthetic.SingleQuotedFailure' result='Failed' /></test-run>`,
+      '<test-run total="2" passed="1" failed="0" skipped="1" inconclusive="1"></test-run>',
+      '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.Skipped" result="Skipped" /></test-run>',
+      '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.Inconclusive" result="Inconclusive" /></test-run>',
+      '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.Failed" success="False" /></test-run>',
+      '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.One" result="Passed" /><test-case name="Synthetic.Two" result="Passed"></test-case></test-run>',
+    ]) {
+      await writeFile(xmlPath, contradictoryXml);
+      await assert.rejects(() => inspect({ testResultsPath: xmlPath }), /Conflicting XML evidence/);
+    }
+    // Count evidence beyond the retained-record limit without requiring complete records.
+    const boundedRecords = Array.from({ length: 2001 }, (_, index) => `<test-case name="Synthetic.Passing${index}" result="Passed" />`).join("");
+    await writeFile(xmlPath, `<test-run total="2002" passed="2002" failed="0">${boundedRecords}<test-case name="Synthetic.LateSkipped" result="Skipped" /></test-run>`);
+    await assert.rejects(() => inspect({ testResultsPath: xmlPath }), /Conflicting XML evidence/, "Truncation cannot hide a late conflicting record.");
+    await writeFile(xmlPath, '<test-run passed="1" failed="0" skipped="1"></test-run>');
+    assert.equal((await inspect({ testResultsPath: xmlPath })).details.testOutcome, "uncertain", "A missing total alone is not a contradiction.");
+    await assert.rejects(() => inspect({ testResultsPath: xmlPath, normalizedResultPath: gateLinked }), /Conflicting normalized\/XML evidence/, "A linked total must still agree with XML-only counters.");
+    await writeFile(xmlPath, '<test-run total="1" passed="1" failed="0"><test-case name="Synthetic.Unknown" /></test-run>');
+    for (const mixed of [false, true]) assert.equal((await inspect({ testResultsPath: xmlPath, ...(mixed ? { normalizedResultPath: gateLinked } : {}) })).details.testOutcome, "uncertain", "Unknown record outcomes are not passing records.");
+    for (const { xml, summary, outcome, records } of [
+      { xml: '<test-run total="1" passed="1" failed="0"></test-run>', summary: { total: 1, passed: 1, failed: 0 }, outcome: "passed", records: 0 },
+      { xml: '<test-run total="2" passed="2" failed="0"><test-case name="Synthetic.Partial" result="Passed" /></test-run>', summary: { total: 2, passed: 2, failed: 0 }, outcome: "passed", records: 1 },
+      { xml: '<test-run total="1" passed="0" failed="1"><test-case name="Synthetic.Failed" result="Failed" /></test-run>', summary: { total: 1, passed: 0, failed: 1 }, outcome: "tests_failed", records: 1 },
+      { xml: '<test-run total="2" passed="1" failed="0" skipped="1"><test-case name="Synthetic.Skipped" result="Skipped" /></test-run>', summary: { total: 2, passed: 1, failed: 0, skipped: 1 }, outcome: "uncertain", records: 1 },
+      { xml: '<test-run total="2" passed="1" failed="0" inconclusive="1"><test-case name="Synthetic.Inconclusive" result="Inconclusive" /></test-run>', summary: { total: 2, passed: 1, failed: 0, inconclusive: 1 }, outcome: "uncertain", records: 1 },
+      { xml: '<test-run total="3" passed="1" failed="0" skipped="1" inconclusive="1"></test-run>', summary: { total: 3, passed: 1, failed: 0, skipped: 1, inconclusive: 1 }, outcome: "uncertain", records: 0 },
+      { xml: '<test-run passed="1" failed="0"><test-case name="Synthetic.Partial" result="Passed" /></test-run>', summary: { passed: 1, failed: 0 }, outcome: "uncertain", records: 1 },
+    ] as const) {
+      await writeFile(xmlPath, xml);
+      const control = await artifact({ ...base, source: "unity-cli", summary, outcome, tests: [], backendArtifacts: { nunit: "Logs/exact.xml" } });
+      for (const mixed of [false, true]) {
+        const result = await inspect({ testResultsPath: xmlPath, ...(mixed ? { normalizedResultPath: control } : {}) });
+        assert.equal(result.details.status, "passed", "Consistent partial/optional evidence remains inspectable.");
+        assert.equal(result.details.testOutcome, outcome);
+        assert.equal(result.details.parsedTestResults.tests.length, records);
+        assert.equal(result.details.parsedTestResults.skipped, "skipped" in summary ? summary.skipped : undefined, "Omitted skipped is not synthesized from inconclusive.");
+        if (outcome === "tests_failed") assert.equal(result.details.parsedTestResults.failedTests[0].name, "Synthetic.Failed");
+      }
+    }
     const logOnly = await inspect({ logFilePath: "Logs/unrelated.log" });
     assert.equal(logOnly.details.status, "passed");
     assert.equal(logOnly.details.testOutcome, undefined, "A loaded log alone is not test evidence.");
