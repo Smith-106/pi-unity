@@ -270,6 +270,23 @@ try {
     inspect: async () => capabilities(root, ++inspections > 2 ? 99 : 42), canonicalize: async value => value, now: () => clock, sleep: async ms => { clock += ms; },
   }), /identity changed/);
 
+  let dispatchAttempts = 0;
+  await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
+    execute: async (_command, args) => {
+      if (args.includes("editor_status")) return { stdout: envelope({ status: "idle" }), stderr: "" };
+      dispatchAttempts += 1;
+      return { stdout: JSON.stringify({ success: false, data: { error: "Pipeline 0.6.0-exp.1 or newer is required" } }), stderr: "", error: new Error("native failure") };
+    }, inspect: async () => capabilities(root), canonicalize: async value => value,
+  }), /0\.6\.0-exp\.1 or newer/);
+  assert.equal(dispatchAttempts, 1, "Native required-version diagnostics do not cause redispatch.");
+
+  const warningRecompile = await runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
+    execute: async (_command, args) => args.includes("editor_status") ? { stdout: envelope({ status: "idle" }), stderr: "" } : { stdout: JSON.stringify({ success: true, warnings: [{ message: "nonfatal guidance" }], result: { status: "up_to_date" } }), stderr: "" },
+    inspect: async () => capabilities(root), canonicalize: async value => value,
+  });
+  assert.equal(warningRecompile.details.terminalState, "up_to_date");
+  assert.deepEqual(warningRecompile.details.warnings, ["nonfatal guidance"]);
+
   const abort = new AbortController(); abort.abort();
   await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
     execute: async () => ({ stdout: envelope({ status: "up_to_date" }), stderr: "" }), inspect: async () => capabilities(root), canonicalize: async value => value,

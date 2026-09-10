@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { projectPathsMatch } from "./unity-core";
-import { resolveUnityCliCommand, type UnityCliExecResult, type UnityCliExecutor, type UnityCliProjectCapabilities } from "./unity-cli";
+import { redactUnityPlanningOutput, resolveUnityCliCommand, summarizeUnityCliText, type UnityCliExecResult, type UnityCliExecutor, type UnityCliProjectCapabilities } from "./unity-cli";
 
 /** Public limits are deliberately small enough that connected work cannot create an unbounded agent wait loop. */
 export const UNITY_PIPELINE_COMPILE_TIMEOUT_SECONDS = 180;
@@ -31,6 +31,8 @@ export type UnityPipelineOperationDetails = {
   testPlatform?: "EditMode" | "PlayMode";
   testFilter?: string;
   counts?: { total: number; passed?: number; failed: number; inconclusive?: number };
+  /** Bounded nonfatal Pipeline envelope guidance; never compiler-error evidence. */
+  warnings?: string[];
 };
 export type UnityPipelineTestRecord = { name: string; status: string; durationSeconds?: number; message?: string; stackTrace?: string };
 /** testRecords are terminal evidence for the caller's durable artifact only; do not expose them in tool details. */
@@ -71,6 +73,25 @@ function field(value: RecordValue, ...names: string[]): unknown {
 function bounded(value: string, limit = UNITY_PIPELINE_MAX_STACK_CHARS): string {
   const oneLine = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
   return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}…` : oneLine;
+}
+function pipelineEnvelopeWarnings(output: string): string[] {
+  const outer = (() => { try { return record(JSON.parse(output)); } catch { return undefined; } })();
+  const entries = Array.isArray(outer?.warnings) ? outer.warnings : [];
+  return entries.slice(0, UNITY_PIPELINE_MAX_DIAGNOSTICS).flatMap(entry => {
+    const item = record(entry); const message = string(field(item ?? {}, "message", "detail", "warning")) ?? string(entry);
+    return message ? [bounded(redactUnityPlanningOutput(message), 1_000)] : [];
+  });
+}
+function pipelineFailureDiagnostic(response: UnityCliExecResult): string {
+  const raw = [response.stdout, response.stderr, response.error?.message].filter(Boolean).join("\n");
+  let message: string | undefined;
+  try {
+    const outer = record(JSON.parse(response.stdout)); const data = record(outer?.data);
+    const errors = Array.isArray(outer?.errors) ? outer?.errors : [];
+    const first = record(errors[0]);
+    message = string(field(first ?? {}, "message", "detail")) ?? string(field(data ?? {}, "error", "errordetails", "message")) ?? string(field(outer ?? {}, "error", "errordetails", "message"));
+  } catch { /* retain bounded native raw fallback */ }
+  return summarizeUnityCliText(redactUnityPlanningOutput(message ?? raw), 1_000, 10);
 }
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("Unity Pipeline operation aborted; its Editor operation may still be running.");
@@ -451,11 +472,12 @@ export async function runUnityPipelineRecompile(request: UnityPipelineCompileReq
   ensureBeforeDeadline(deadline, now, "recompile before dispatch");
   throwIfAborted(signal);
   const dispatched = await dispatchMainThreadCommand(deps, projectRoot, "recompile", [], "recompile", signal, deadline, now, sleep);
-  if (dispatched.error) throw new Error("Unity Pipeline recompile dispatch failed; operation may not have started.");
+  if (dispatched.error) throw new Error(`Unity Pipeline recompile dispatch failed; operation may not have started.${pipelineFailureDiagnostic(dispatched) ? ` ${pipelineFailureDiagnostic(dispatched)}` : ""}`);
+  const dispatchWarnings = pipelineEnvelopeWarnings(dispatched.stdout);
   let state = normalizeUnityPipelineCompile(dispatched.stdout);
   if (state.state === "uncertain") throw new Error("Unity Pipeline recompile dispatch returned malformed or uncertain evidence; operation may have started.");
   if (state.state === "failed") throw new Error(`Unity recompile failed: ${state.diagnostics.join("; ") || "compiler failure reported"}`);
-  if (state.state === "up_to_date") return { text: `${lifecyclePrefix}Unity scripts are up to date for ${projectRoot}; no compilation was triggered.`,  details: { projectRoot, operation: "recompile", terminalState: "up_to_date", elapsedSeconds: elapsed(start, now), compilationTriggered: false, ...playModeDetails(preflight) } };
+  if (state.state === "up_to_date") return { text: `${lifecyclePrefix}Unity scripts are up to date for ${projectRoot}; no compilation was triggered.`,  details: { projectRoot, operation: "recompile", terminalState: "up_to_date", elapsedSeconds: elapsed(start, now), compilationTriggered: false, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}), ...playModeDetails(preflight) } };
   for (let poll = 0; now() < deadline; poll += 1) {
     options.onUpdate?.(`Unity recompile ${state.state}; ${elapsed(start, now).toFixed(1)}s elapsed.`);
     const delay = Math.min(UNITY_PIPELINE_BACKOFF_SECONDS[Math.min(poll, UNITY_PIPELINE_BACKOFF_SECONDS.length - 1)]! * 1000, deadline - now());
@@ -470,7 +492,7 @@ export async function runUnityPipelineRecompile(request: UnityPipelineCompileReq
     if (isUnityPipelineInitialSettlingBusy(response.stdout)) continue;
     state = normalizeUnityPipelineCompile(response.stdout);
     if (state.state === "failed") throw new Error(`Unity recompile failed: ${state.diagnostics.join("; ") || "compiler failure reported"}`);
-    if (state.state === "completed" || state.state === "up_to_date") return { text: `${lifecyclePrefix}Unity recompile completed for ${projectRoot} in ${elapsed(start, now).toFixed(1)}s; 0 compiler errors.`,  details: { projectRoot, operation: "recompile", terminalState: state.state, elapsedSeconds: elapsed(start, now), compilationTriggered: true, ...playModeDetails(preflight) } };
+    if (state.state === "completed" || state.state === "up_to_date") return { text: `${lifecyclePrefix}Unity recompile completed for ${projectRoot} in ${elapsed(start, now).toFixed(1)}s; 0 compiler errors.`,  details: { projectRoot, operation: "recompile", terminalState: state.state, elapsedSeconds: elapsed(start, now), compilationTriggered: true, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}), ...playModeDetails(preflight) } };
     if (state.state === "uncertain") throw new Error("Unity Pipeline recompile status is malformed or uncertain; operation may still be running.");
   }
   throw timeoutMessage("recompile");
@@ -499,7 +521,8 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
   const args = ["--mode", request.testPlatform === "EditMode" ? "editor" : "playmode", ...selectorArgs, "--async_tests", "true"];
   ensureBeforeDeadline(deadline, now, "tests before dispatch"); throwIfAborted(signal);
   const dispatched = await dispatchMainThreadCommand(deps, projectRoot, "run_tests", args, "tests", signal, deadline, now, sleep);
-  if (dispatched.error) throw new Error("Unity Pipeline test dispatch failed; test run may not have started.");
+  if (dispatched.error) throw new Error(`Unity Pipeline test dispatch failed; test run may not have started.${pipelineFailureDiagnostic(dispatched) ? ` ${pipelineFailureDiagnostic(dispatched)}` : ""}`);
+  const dispatchWarnings = pipelineEnvelopeWarnings(dispatched.stdout);
   let state = normalizeUnityPipelineTest(dispatched.stdout);
   if (state.state === "uncertain" || state.state === "inactive") throw new Error("Unity Pipeline test dispatch returned inactive, malformed, or uncertain evidence; test run may not have started.");
   if (state.state === "failed" || state.state === "cancelled") throw new Error(`Unity ${request.testPlatform} tests failed: ${state.failures.join("; ") || state.state}.`);
@@ -510,7 +533,7 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
   if (state.state === "completed") {
     const counts = passingCounts(state);
     if (!counts) throw new Error("Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).");
-    return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts }, testRecords: state.testRecords };
+    return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}) }, testRecords: state.testRecords };
   }
   for (let poll = 0; now() < deadline; poll += 1) {
     options.onUpdate?.(`Unity ${request.testPlatform} tests ${state.state}; ${elapsed(start, now).toFixed(1)}s elapsed.`);
@@ -532,7 +555,8 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
     if (state.state !== "completed") continue;
     const counts = passingCounts(state);
     if (!counts) throw new Error("Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).");
-    return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts }, testRecords: state.testRecords };
+    return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}) }, testRecords: state.testRecords };
   }
   throw timeoutMessage("tests");
 }
+
