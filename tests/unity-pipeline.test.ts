@@ -286,6 +286,45 @@ try {
   });
   assert.equal(warningRecompile.details.terminalState, "up_to_date");
   assert.deepEqual(warningRecompile.details.warnings, ["nonfatal guidance"]);
+  assert.match(warningRecompile.text, /nonfatal guidance/);
+
+  let modalDispatches = 0;
+  await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
+    execute: async (_command, args) => {
+      if (args.includes("editor_status")) return { stdout: envelope({ status: "idle" }), stderr: "" };
+      modalDispatches++;
+      return { stdout: JSON.stringify({ success: false, data: { error: "Server Busy", errorDetails: "A modal dialog is blocking commands" } }), stderr: "", error: new Error("native failure") };
+    }, inspect: async () => capabilities(root), canonicalize: async value => value,
+  }), /Server Busy; A modal dialog is blocking commands/);
+  assert.equal(modalDispatches, 1);
+
+  let warningClock = 0;
+  const polledWarnings = await runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
+    execute: async (_command, args) => {
+      if (args.includes("editor_status")) return { stdout: envelope({ status: "idle" }), stderr: "" };
+      return { stdout: JSON.stringify({ success: true, data: { warnings: [args.includes("recompile_status") ? "poll warning" : "dispatch warning"], result: { status: args.includes("recompile_status") ? "completed" : "triggered" } } }), stderr: "" };
+    }, inspect: async () => capabilities(root), canonicalize: async value => value,
+    now: () => warningClock, sleep: async ms => { warningClock += ms; },
+  });
+  assert.deepEqual(polledWarnings.details.warnings, ["dispatch warning", "poll warning"]);
+  assert.match(polledWarnings.text, /dispatch warning; poll warning/);
+
+  const warningTests = await runUnityPipelineTests({ projectRoot: root, unityVersion: "6000", testPlatform: "EditMode" }, {
+    execute: async (_command, args) => {
+      if (args.includes("editor_status")) return { stdout: envelope({ status: "idle" }), stderr: "" };
+      if (args.includes("test_status")) return { stdout: envelope({ status: "idle" }), stderr: "" };
+      return { stdout: JSON.stringify({ success: true, data: { warnings: ["test guidance"], result: { status: "completed", summary: { total: 2, passed: 2, failed: 0 } } } }), stderr: "" };
+    }, inspect: async () => capabilities(root), canonicalize: async value => value,
+  });
+  assert.equal(warningTests.details.counts?.passed, 2);
+  assert.deepEqual(warningTests.details.warnings, ["test guidance"]);
+  assert.match(warningTests.text, /test guidance/);
+
+  await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {
+    execute: async () => { throw new Error("must not dispatch after incomplete discovery"); },
+    inspect: async () => ({ ...capabilities(root), commandDiscoverySucceeded: false, commandDiscovery: "unavailable", warnings: ["Requires Pipeline 0.6.0-exp.1; token=secret"] }),
+    canonicalize: async value => value,
+  }), /Requires Pipeline 0\.6\.0-exp\.1; token= \[redacted\]/);
 
   const abort = new AbortController(); abort.abort();
   await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {

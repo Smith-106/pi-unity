@@ -584,6 +584,12 @@ export type UnityPipelineRunScriptRequest = {
   dryRun?: boolean;
 };
 
+/** Attach bounded native discovery guidance without changing the readiness decision. */
+export function unityCapabilityDiagnosticSuffix(capabilities: UnityCliProjectCapabilities): string {
+  const message = summarizeUnityCliText(redactUnityPlanningOutput(capabilities.warnings.slice(0, 8).join("; ")), 1_000, 10);
+  return message ? ` ${message}` : "";
+}
+
 function planningInspectionReadiness(capabilities: UnityCliProjectCapabilities): string | undefined {
   if (!capabilities.cliAvailable) return "unity_cli_unavailable";
   if (capabilities.pipelineDiscovery !== "available") return `pipeline_${capabilities.pipelineDiscovery}`;
@@ -672,7 +678,7 @@ export async function dispatchUnityPlanningInspection(
   }));
   const initial = await inspect(projectRoot, request.unityVersion);
   const initialFailure = planningInspectionReadiness(initial);
-  if (initialFailure) return { outcome: "rejected", code: initialFailure, message: "Exact-copy Pipeline planning inspection is not established." };
+  if (initialFailure) return { outcome: "rejected", code: initialFailure, message: `Exact-copy Pipeline planning inspection is not established.${unityCapabilityDiagnosticSuffix(initial)}` };
 
   const isEval = request.command === "eval";
   const hasBoundedArgs = (request.args?.length ?? 0) <= 12
@@ -695,7 +701,7 @@ export async function dispatchUnityPlanningInspection(
   const refreshed = await inspect(projectRoot, request.unityVersion);
   const refreshedFailure = planningInspectionReadiness(refreshed);
   if (refreshedFailure || !haveSameKnownProcessIds(initial.matchingInstances, refreshed.matchingInstances)) {
-    return { outcome: "rejected", code: "unity_project_identity_changed", message: "Pipeline identity changed or disconnected immediately before planning dispatch." };
+    return { outcome: "rejected", code: "unity_project_identity_changed", message: `Pipeline identity changed or disconnected immediately before planning dispatch.${unityCapabilityDiagnosticSuffix(refreshed)}` };
   }
   if (!refreshed.advertisedCommands.includes(request.command)) {
     return { outcome: "rejected", code: "planning_command_unadvertised", message: "The refreshed exact Pipeline copy did not advertise the requested command." };
@@ -743,9 +749,9 @@ export async function dispatchUnityPipelineRunScript(
   if (serializedArgs === undefined || serializedArgs.length > 4_000 || (request.entry?.length ?? 0) > 500 || /[\u0000-\u001f\u007f]/.test(request.entry ?? "")) return { outcome: "rejected", code: "run_script_args_invalid", message: "run_script entry or JSON arguments exceed bounded request limits." };
   const inspect = options.inspect ?? ((root, version) => inspectUnityCliProjectCapabilities(root, version, { cliCommand: options.cliCommand, timeout: options.timeout, signal: options.signal, execute: options.execute }));
   const initial = await inspect(projectRoot, request.unityVersion);
-  if (planningInspectionReadiness(initial) || !initial.advertisedCommands.includes("run_script")) return { outcome: "rejected", code: "run_script_unavailable", message: "The exact reachable Pipeline copy does not establish advertised run_script support." };
+  if (planningInspectionReadiness(initial) || !initial.advertisedCommands.includes("run_script")) return { outcome: "rejected", code: "run_script_unavailable", message: `The exact reachable Pipeline copy does not establish advertised run_script support.${unityCapabilityDiagnosticSuffix(initial)}` };
   const refreshed = await inspect(projectRoot, request.unityVersion);
-  if (planningInspectionReadiness(refreshed) || !haveSameKnownProcessIds(initial.matchingInstances, refreshed.matchingInstances) || !refreshed.advertisedCommands.includes("run_script")) return { outcome: "rejected", code: "unity_project_identity_changed", message: "Pipeline identity or run_script availability changed immediately before dispatch." };
+  if (planningInspectionReadiness(refreshed) || !haveSameKnownProcessIds(initial.matchingInstances, refreshed.matchingInstances) || !refreshed.advertisedCommands.includes("run_script")) return { outcome: "rejected", code: "unity_project_identity_changed", message: `Pipeline identity or run_script availability changed immediately before dispatch.${unityCapabilityDiagnosticSuffix(refreshed)}` };
   const timeout = Math.max(1, Math.min(options.timeout ?? 30_000, 86_400_000));
   const args = ["--format", "json", "--no-banner", "--non-interactive", "command", "--project-path", projectRoot, "--timeout", String(Math.ceil(timeout / 1000)), "run_script", "--file", relativeFile, "--mode", "ephemeral", "--args", serializedArgs, "--timeout_ms", String(timeout), ...(request.entry?.trim() ? ["--entry", request.entry.trim()] : []), ...(request.dryRun ? ["--dry_run", "true"] : [])];
   const execution = await options.execute(resolveUnityCliCommand({ cliCommand: options.cliCommand }), args, { timeout, signal: options.signal });

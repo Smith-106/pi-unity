@@ -351,6 +351,19 @@ try {
     const rejected = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile }, { inspect: async () => planningCapabilities(42, ["run_script"]), execute: async () => ({ stdout, stderr: "" }) });
     assert.equal(rejected.outcome, "rejected"); if (rejected.outcome === "rejected") assert.equal(rejected.code, code);
   }
+  const unavailableInspect = async () => ({ ...planningCapabilities(42, ["run_script", "eval", "get_runtime_pipeline_settings"]), commandDiscoverySucceeded: false, commandDiscovery: "unavailable" as const, warnings: ["Requires Pipeline 0.6.0-exp.1; token=secret"] });
+  const noDispatch = async () => { throw new Error("unavailable capability must not dispatch"); };
+  for (const result of [
+    await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile }, { inspect: unavailableInspect, execute: noDispatch }),
+    await dispatchUnityPlanningInspection({ projectRoot: planningProject, unityVersion: "6000", command: "eval", evalSnippet: "return 1;" }, { inspect: unavailableInspect, execute: noDispatch }),
+    await dispatchUnityPlanningInspection({ projectRoot: planningProject, unityVersion: "6000", command: "get_runtime_pipeline_settings" }, { inspect: unavailableInspect, execute: noDispatch }),
+  ]) {
+    assert.equal(result.outcome, "rejected");
+    if (result.outcome === "rejected") {
+      assert.match(result.message, /Requires Pipeline 0\.6\.0-exp\.1/);
+      assert(!result.message.includes("secret"));
+    }
+  }
   const scriptResponse = { result: { success: false }, diagnostics: [], compileMs: 1, executeMs: 0, assemblyName: "Script" };
   for (const [label, envelope, expected] of [
     ["legacy transport failure", { success: true, data: { success: false, result: scriptResponse } }, "rejected"],
