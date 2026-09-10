@@ -112,9 +112,16 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
   assert(inspectionTool, "pi-unity must register the purpose-built Pipeline inspection tool");
   assert.equal(inspectionTool.parameters.additionalProperties, false);
   assert.deepEqual(inspectionTool.parameters.properties.command.enum, [
-    "get_authoring_root", "get_build_settings", "get_player_settings", "get_scene_hierarchy",
+    "get_authoring_root", "get_build_settings", "get_player_settings", "get_runtime_pipeline_settings", "get_scene_hierarchy",
     "editor_status", "list_open_scenes", "list_build_targets",
   ], "The inspection schema must advertise only package-owned purpose-built commands.");
+  const runScriptTool = unity.tools.find((tool) => tool.name === "unity_pipeline_run_script");
+  assert(runScriptTool, "pi-unity must register the bounded Pipeline run_script tool");
+  assert.equal(runScriptTool.parameters.additionalProperties, false);
+  assert.equal(runScriptTool.parameters.properties.file.type, "string");
+  assert.equal(runScriptTool.parameters.properties.dryRun.type, "boolean");
+  assert.match(runScriptTool.promptGuidelines.join(" "), /arbitrary code execution/i);
+  assert.match(runScriptTool.promptGuidelines.join(" "), /hotpatch/i);
   assert.match(inspectionTool.promptGuidelines.join(" "), /never launches or closes Unity/i);
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   const rendererContext = { lastComponent: undefined };
@@ -205,7 +212,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const canonicalProject = await realpath(project);
     const pi = fakePi(async (_command, args) => {
       calls.push(args);
-      if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+      if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonicalProject, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
       if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["get_authoring_root", "eval"] } }), stderr: "" };
       const connectedCommand = args[args.indexOf("--timeout") + 2];
@@ -244,7 +251,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const canonicalProject = await realpath(project);
     let playMode = true;
     const pi = fakePi(async (_command, args) => {
-      if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+      if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonicalProject, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
       if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "editor_stop", "recompile", "recompile_status", "run_tests", "test_status"] } }), stderr: "" };
       const command = args[args.indexOf("--timeout") + 2];
@@ -317,7 +324,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     for (const scenario of ["passed", "malformed", "timeout", "displaced", "zero", "active"] as const) {
       const commands: string[][] = [];
       const pi = fakePi(async (_command, args) => {
-        if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+        if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
         const response = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
         if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
         if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
@@ -402,7 +409,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
         const command = name === "unity_pipeline_eval" ? "eval" : "get_authoring_root";
         const pi = fakePi(async (_command, args) => {
           calls.push(args);
-          if (args[0] === "--version") return { code: 0, stdout: "1.0.0", stderr: "" };
+          if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
           if (args.includes("pipeline") && args.includes("list")) {
             discoveries++;
             return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: project, pid: scenario === "identity" && discoveries > 1 ? 43 : 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };

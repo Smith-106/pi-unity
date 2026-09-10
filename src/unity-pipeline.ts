@@ -102,8 +102,10 @@ export function parseUnityPipelineEnvelope(output: string): ParsedEnvelope {
   let outer: RecordValue | undefined;
   try { outer = record(JSON.parse(output)); } catch { return { result: {}, outerSuccess: false, malformed: "Unity Pipeline returned malformed JSON." }; }
   if (!outer) return { result: {}, outerSuccess: false, malformed: "Unity Pipeline returned a non-object JSON envelope." };
+  // Pipeline 0.6 may return the compact exec envelope { success, result, warnings }
+  // rather than the older CLI wrapper { success, data: { result } }.
   const data = record(outer.data);
-  const rawResult = data?.result ?? data;
+  const rawResult = data?.result ?? outer.result ?? data;
   if (typeof rawResult === "string") {
     try {
       const parsed = record(JSON.parse(rawResult));
@@ -148,15 +150,14 @@ function diagnostics(result: RecordValue): string[] {
   });
   return [...new Set(values)].slice(0, UNITY_PIPELINE_MAX_DIAGNOSTICS);
 }
-/** True only for Pipeline 0.5's explicit rejected outer envelope, before a main-thread command is dispatched. */
-export function isUnityPipelineInitialSettlingBusy(output: string): boolean {
-  let outer: RecordValue | undefined;
-  try { outer = record(JSON.parse(output)); } catch { return false; }
-  const data = record(outer?.data);
-  return outer?.success === false
-    && string(field(data ?? {}, "error"))?.toLowerCase() === "server busy"
-    && statusOf(data ?? {}) === "busy"
-    && field(data ?? {}, "retryable") === true;
+/**
+ * Do not retry generic busy envelopes. Pipeline 0.6 uses busy for modal dialogs as
+ * well as startup settling, and neither is distinguishable in the legacy CLI-shaped
+ * response. Retrying would blindly repeat a command blocked by a user-visible modal.
+ * A future retry must be wired only to a source-verified pre-dispatch discriminator.
+ */
+export function isUnityPipelineInitialSettlingBusy(_output: string): boolean {
+  return false;
 }
 
 export function normalizeUnityPipelineCompile(output: string): NormalizedCompile {

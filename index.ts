@@ -20,7 +20,7 @@ import {
   type UnityParsedTestResults,
 } from "./src/unity-batchmode";
 import { formatPathForUser, hasUnityCommandLineFlag } from "./src/unity-core";
-import { createUnityCliBatchmodeReportArgs, createUnityCliEditorExitCommand, createUnityCliRunCommand, createUnityCliTestCommand, dispatchUnityPlanningInspection, haveSameKnownProcessIds, inspectUnityCliProjectCapabilities, listRunningUnityCliEditorsForProject, resolveUnityCliCommand, UNITY_PLANNING_READ_COMMANDS, type UnityCliProjectCapabilities } from "./src/unity-cli";
+import { createUnityCliBatchmodeReportArgs, createUnityCliEditorExitCommand, createUnityCliRunCommand, createUnityCliTestCommand, dispatchUnityPipelineRunScript, dispatchUnityPlanningInspection, haveSameKnownProcessIds, inspectUnityCliProjectCapabilities, listRunningUnityCliEditorsForProject, resolveUnityCliCommand, UNITY_PLANNING_READ_COMMANDS, type UnityCliProjectCapabilities } from "./src/unity-cli";
 import { launchUnityCliOpenDetached } from "./src/unity-launch";
 import { createUnityBatchmodeCommand, launchUnityEditorDetached, resolveUnityEditorPath } from "./src/unity-editor-fallback";
 import { loadPiUnitySettings, type PiUnitySettings } from "./src/pi-unity-settings";
@@ -70,7 +70,7 @@ const GUI_WARNING = "This launches the full Unity Editor GUI and is not the same
 const SINGLE_PROCESS_WARNING = "Unity allows only one process per project folder. GUI Editor and batchmode/headless both count as that one process.";
 
 type UnityToolDetails = {
-  mode: "gui" | "batchmode" | "status" | "artifacts" | "pipeline_inspection" | "pipeline_eval" | "pipeline" | "tests";
+  mode: "gui" | "batchmode" | "status" | "artifacts" | "pipeline_inspection" | "pipeline_eval" | "pipeline_run_script" | "pipeline" | "tests";
   projectRoot: string;
   unityVersion: string;
   editorPath: string;
@@ -101,6 +101,7 @@ type UnityToolDetails = {
   cliCapabilities?: UnityCliProjectCapabilities;
   pipelineInspection?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
   pipelineEval?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
+  pipelineRunScript?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
   pipeline?: UnityPipelineOperationDetails;
 };
 
@@ -165,6 +166,15 @@ const PIPELINE_EVAL_PARAMS = Type.Object({
   path: Type.Optional(Type.String({ maxLength: 1000, description: "Unity project path, workspace copy root, or folder containing project copies." })),
   code: Type.String({ minLength: 1, maxLength: 4000, description: "Bounded C# source for advertised Pipeline eval. Roslyn compiles it on the connected Editor main thread; include an explicit return value when evidence is needed." }),
   timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400, default: 12, description: "Connected eval deadline in seconds (maximum 24 hours). A timeout is uncertain and does not retry or cancel Unity work." })),
+}, { additionalProperties: false });
+
+const PIPELINE_RUN_SCRIPT_PARAMS = Type.Object({
+  path: Type.Optional(Type.String({ maxLength: 1000, description: "Unity project path, workspace copy root, or folder containing project copies." })),
+  file: Type.String({ minLength: 1, maxLength: 1000, description: "Existing .cs file under the selected project root. The file is compiled in memory; it is not written or imported." }),
+  entry: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Named static entry point. Omit only when Pipeline can select Main or an unambiguous public static method." })),
+  args: Type.Optional(Type.Array(Type.Any(), { maxItems: 32, description: "Bounded JSON arguments coerced by Pipeline to the static entry-point parameter types." })),
+  dryRun: Type.Optional(Type.Boolean({ default: false, description: "Compile only; do not load the assembly or invoke the entry point." })),
+  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400, default: 30, description: "Connected run_script deadline. A timeout is uncertain and does not cancel the script." })),
 }, { additionalProperties: false });
 
 const PIPELINE_INSPECTION_PARAMS = Type.Object({
@@ -1294,9 +1304,9 @@ function renderUnityPipelineResult(result: any, options: { expanded: boolean; is
     const counts = pipeline.counts;
     const passed = counts?.passed === undefined || counts?.total === undefined ? "tests completed" : `${counts.passed}/${counts.total} passed`;
     text = `${icon} ${theme.fg("toolTitle", theme.bold(`Unity ${pipeline.testPlatform ?? ""} tests`.trim()))} ${theme.fg("accent", passed)}${theme.fg("muted", ` • ${pipeline.elapsedSeconds.toFixed(1)}s`)}`;
-  } else if (details.mode === "pipeline_eval" || details.mode === "pipeline_inspection") {
-    const output = details.mode === "pipeline_eval" ? details.pipelineEval : details.pipelineInspection;
-    const label = details.mode === "pipeline_eval" ? "Unity Pipeline Eval" : "Unity Pipeline Inspection";
+  } else if (details.mode === "pipeline_eval" || details.mode === "pipeline_inspection" || details.mode === "pipeline_run_script") {
+    const output = details.mode === "pipeline_eval" ? details.pipelineEval : details.mode === "pipeline_run_script" ? details.pipelineRunScript : details.pipelineInspection;
+    const label = details.mode === "pipeline_eval" ? "Unity Pipeline Eval" : details.mode === "pipeline_run_script" ? "Unity Pipeline Run Script" : "Unity Pipeline Inspection";
     const summary = output?.outcome === "dispatched" ? output.output || "(no bounded output returned)" : output?.message || primaryText;
     text = `${icon} ${theme.fg("toolTitle", theme.bold(label))}\n  ${theme.fg("toolOutput", compactUnityRendererValue(summary, 240))}`;
   } else {
@@ -1337,7 +1347,9 @@ function renderUnityToolResult(result: any, expanded: boolean, theme: any): Text
           ? "Unity Pipeline Inspection"
           : details.mode === "pipeline_eval"
             ? "Unity Pipeline Eval"
-            : details.mode === "pipeline"
+            : details.mode === "pipeline_run_script"
+              ? "Unity Pipeline Run Script"
+              : details.mode === "pipeline"
               ? "Unity Pipeline"
               : getBatchmodeVariantLabel(details.args);
   const projectLabel = details.projectRoot ?? "(unknown project)";
@@ -1391,7 +1403,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
   pi.on("tool_result", (event) => {
     const details = event.details as UnityToolDetails | undefined;
     if ((event.toolName === "unity_pipeline_eval" && details?.mode === "pipeline_eval" && details.pipelineEval?.outcome === "rejected")
-      || (event.toolName === "unity_pipeline_inspect" && details?.mode === "pipeline_inspection" && details.pipelineInspection?.outcome === "rejected")) {
+      || (event.toolName === "unity_pipeline_inspect" && details?.mode === "pipeline_inspection" && details.pipelineInspection?.outcome === "rejected")
+      || (event.toolName === "unity_pipeline_run_script" && details?.mode === "pipeline_run_script" && details.pipelineRunScript?.outcome === "rejected")) {
       return { isError: true };
     }
   });
@@ -1699,6 +1712,39 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       return renderUnityPipelineResult(result, options, theme, context);
     },
+  });
+
+  pi.registerTool({
+    name: "unity_pipeline_run_script",
+    label: "Unity Pipeline Run Script",
+    description: "Compile one existing project C# file in memory and invoke its advertised static entry point through Pipeline 0.6 run_script.",
+    promptSnippet: "Run one explicitly requested existing C# builder script through an already-open exact Unity Pipeline Editor.",
+    promptGuidelines: [
+      "unity_pipeline_run_script is arbitrary code execution, not read-only and not a sandbox. Use it only for explicit user intent; obtain explicit authorization for lifecycle, settings, asset, build, test, or destructive mutations.",
+      "It uses Pipeline's ephemeral mode only: no hotpatch, no source upload, no asset import, no domain reload, no retry, fallback, cancellation, launch, save, or Play Mode exit.",
+      "Use dryRun=true to compile without loading or executing the script. A failure, malformed result, or timeout never establishes success; a timeout may still have running script effects.",
+    ],
+    parameters: PIPELINE_RUN_SCRIPT_PARAMS,
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      throwIfAborted(signal);
+      const { candidate } = await resolveProjectCandidate(ctx, params.path);
+      const file = isAbsolute(params.file) ? params.file : resolve(candidate.projectRoot, params.file);
+      const result = await dispatchUnityPipelineRunScript({
+        projectRoot: candidate.projectRoot,
+        unityVersion: await requireManualUnityVersion(candidate),
+        file,
+        entry: params.entry,
+        args: params.args,
+        dryRun: params.dryRun,
+        timeoutMilliseconds: (params.timeoutSeconds ?? 30) * 1000,
+      }, { execute: createPlanningUnityCliExecutor(pi), signal, timeout: (params.timeoutSeconds ?? 30) * 1000 });
+      const text = result.outcome === "dispatched"
+        ? `Unity Pipeline run_script ${params.dryRun ? "compile-only completed" : "completed"}.\n${result.output || "(no bounded output returned)"}`
+        : `Unity Pipeline run_script rejected: ${result.code}\n${result.message}`;
+      return { content: [{ type: "text", text }], details: { mode: "pipeline_run_script", projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), editorPath: "", status: result.outcome === "dispatched" ? "passed" : "failed", pipelineRunScript: result } satisfies UnityToolDetails };
+    },
+    renderCall(args, theme, context) { return renderUnityPipelineCall("unity_pipeline_run_script", args, theme, context); },
+    renderResult(result, options, theme, context) { return renderUnityPipelineResult(result, options, theme, context); },
   });
 
   pi.registerTool({

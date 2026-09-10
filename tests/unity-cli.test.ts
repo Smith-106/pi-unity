@@ -187,19 +187,19 @@ try {
 }
 
 const absentCapabilities = await inspectUnityCliProjectCapabilities("/fixture/closed", "6000.1.0f1", {
-  execute: async (_command, args) => args[0] === "--version"
+  execute: async (_command, args) => args.includes("--version")
     ? { stdout: "1.0.0", stderr: "" }
     : { stdout: JSON.stringify({ success: true, data: { instances: [] } }), stderr: "" },
 });
 assert.equal(absentCapabilities.pipelineDiscovery, "absent", "valid empty discovery is absence, not a timeout");
 const timeoutCapabilities = await inspectUnityCliProjectCapabilities("/fixture/closed", "6000.1.0f1", {
-  execute: async (_command, args) => args[0] === "--version"
+  execute: async (_command, args) => args.includes("--version")
     ? { stdout: "1.0.0", stderr: "" }
     : { stdout: "", stderr: "timeout", error: Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }) },
 });
 assert.equal(timeoutCapabilities.pipelineDiscovery, "timeout");
 const malformedCapabilities = await inspectUnityCliProjectCapabilities("/fixture/closed", "6000.1.0f1", {
-  execute: async (_command, args) => args[0] === "--version" ? { stdout: "1.0.0", stderr: "" } : { stdout: "not-json", stderr: "" },
+  execute: async (_command, args) => args.includes("--version") ? { stdout: "1.0.0", stderr: "" } : { stdout: "not-json", stderr: "" },
 });
 assert.equal(malformedCapabilities.pipelineDiscovery, "unavailable");
 
@@ -207,6 +207,7 @@ assert.deepEqual(UNITY_PLANNING_READ_COMMANDS, [
   "get_authoring_root",
   "get_build_settings",
   "get_player_settings",
+  "get_runtime_pipeline_settings",
   "get_scene_hierarchy",
   "editor_status",
   "list_open_scenes",
