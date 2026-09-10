@@ -7,6 +7,15 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+### Added
+
+- Added advertised `get_runtime_pipeline_settings` inspection and the bounded `unity_pipeline_run_script` tool for Pipeline 0.6 ephemeral in-memory compilation/execution of one existing project C# file. Hotpatch is intentionally out of scope.
+
+### Fixed
+
+- Preserve bounded Unity CLI discovery warnings/info and treat warning-bearing discovery as uncertainty rather than a confirmed absent Pipeline or launch-safe signal. Force human CLI version formatting so inherited `UNITY_FORMAT` cannot corrupt version discovery.
+- Accept Pipeline 0.6 compact response envelopes and warnings without treating warnings as compiler errors. Surface ambiguous busy responses rather than blindly redispatching commands that may be blocked by a modal dialog.
+
 ## 0.12.1 - 2026-09-10
 
 ### Security

@@ -35,11 +35,12 @@ Use these tools with an already-open exact Unity project copy that has a reachab
 - `unity_pipeline_recompile` — recompile through Pipeline with exact-copy preflight, bounded polling, and compact compiler evidence.
 - `unity_run_tests` — one intent-oriented EditMode or PlayMode workflow. It reuses compatible connected Pipeline execution or selects isolated `unity test` when the exact project copy is closed.
 - `unity_pipeline_eval` — execute bounded project-specific C# through Pipeline's Roslyn REPL. It accepts `timeoutSeconds` from 1–86,400 seconds; a timeout is uncertain and does not cancel or retry Editor work.
-- `unity_pipeline_inspect` — dispatch supported package-owned inspection commands and return structured evidence.
+- `unity_pipeline_inspect` — dispatch supported package-owned inspection commands (including read-only `get_runtime_pipeline_settings`) and return structured evidence. Runtime settings are refused by Pipeline in Play Mode; pi-unity never exits Play Mode to read them.
+- `unity_pipeline_run_script` — compile one existing project `.cs` file in Pipeline's ephemeral in-memory mode and invoke a named static entry point; supports bounded JSON arguments and compile-only `dryRun`. It deliberately does not expose hotpatch.
 
 Connected recompilation follows Unity's Script Changes While Playing policy and never preemptively sends `editor_stop`. Connected tests may exit Play Mode through advertised `editor_stop` when necessary, then verify Edit Mode before dispatch. Play Mode exit is allowed by default; `/unity-playmode-exit allow|disallow|status` controls the current session.
 
-A timeout is uncertain: work may still be running. The tools do not silently cancel, retry, launch another Editor, or switch to batchmode. The sole exception is Pipeline 0.5's explicit initial-settling `Server Busy` rejection for `unity_pipeline_recompile` and `unity_run_tests`, which is known not to have dispatched a main-thread command and is retried only within the configured deadline.
+A timeout is uncertain: work may still be running. The tools do not silently cancel, retry, launch another Editor, or switch to batchmode. Pipeline 0.6 can report busy for a modal dialog as well as startup settling, so ambiguous busy responses are surfaced and never blindly retried.
 
 ### Editor and batchmode
 
@@ -84,6 +85,7 @@ Operation-specific recovery belongs to the operational skill. `unity-debugging` 
 | Existing failed-run artifacts | `unity_inspect_artifacts` |
 | Project-specific C# query or operation | `unity_pipeline_eval` |
 | Supported structured project inspection | `unity_pipeline_inspect` |
+| Explicitly requested existing C# builder script | `unity_pipeline_run_script` |
 | Open the GUI explicitly | `unity_open_editor` or `/unity-open` |
 
 Pass an explicit project `path` when multiple copies may be discovered. Pipeline routing compares canonical paths so similarly named copies are not treated as interchangeable.
@@ -112,6 +114,10 @@ Another connected client is not a project lock. When Pipeline returns stable cor
 ```
 
 Use `unity_pipeline_inspect` when a purpose-built structured command fits. Use eval for bounded project-specific work that matches the user's intent. Prefer typed tools when they provide stronger lifecycle, polling, validation, or recovery semantics.
+
+### Pipeline run_script
+
+`unity_pipeline_run_script` is arbitrary code execution, not a sandbox or read-only inspection. Use it only when the user explicitly asks to run that existing file; obtain explicit authorization for lifecycle, settings, asset, build, test, or destructive mutations. It validates the exact project copy and advertised command twice, accepts a single existing `.cs` file inside the project, uses only `mode: ephemeral`, and never launches, saves, cancels, retries, falls back, hotpatches, or exits Play Mode. `dryRun: true` compiles without loading or executing the assembly.
 
 Rejected eval and inspection results are native Pi tool failures (`isError: true`) via the documented `tool_result` middleware, with structured rejection codes and bounded diagnostics retained. Pre-dispatch rejection does not execute the command; a timeout or dispatch failure can leave effects uncertain and never triggers retry or fallback.
 
