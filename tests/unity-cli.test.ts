@@ -351,6 +351,20 @@ try {
     const rejected = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile }, { inspect: async () => planningCapabilities(42, ["run_script"]), execute: async () => ({ stdout, stderr: "" }) });
     assert.equal(rejected.outcome, "rejected"); if (rejected.outcome === "rejected") assert.equal(rejected.code, code);
   }
+  const scriptResponse = { result: { success: false }, diagnostics: [], compileMs: 1, executeMs: 0, assemblyName: "Script" };
+  for (const [label, envelope, expected] of [
+    ["legacy transport failure", { success: true, data: { success: false, result: scriptResponse } }, "rejected"],
+    ["legacy opaque user result", { success: true, data: { success: true, result: scriptResponse } }, "dispatched"],
+    ["compact opaque user result", { success: true, result: scriptResponse }, "dispatched"],
+    ["legacy JSON-string response", { success: true, data: { success: true, result: JSON.stringify(scriptResponse) } }, "dispatched"],
+  ] as const) {
+    const result = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile }, {
+      inspect: async () => planningCapabilities(42, ["run_script"]),
+      execute: async () => ({ stdout: JSON.stringify(envelope), stderr: "" }),
+    });
+    assert.equal(result.outcome, expected, label);
+    if (result.outcome === "rejected") assert.equal(result.code, "run_script_reported_failure", label);
+  }
   assert.equal(redactUnityPlanningOutput("token=abc123def456ghijkl and sk_abcdefghijklmnop"), "token= [redacted] and [redacted]");
   assert.equal(disconnected.outcome, "rejected");
   if (disconnected.outcome === "rejected") assert.equal(disconnected.code, "pipeline_not_reachable");

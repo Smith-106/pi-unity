@@ -602,6 +602,7 @@ function runScriptCommandFailure(output: string): "malformed" | "failure" | unde
   const envelope = parseJsonObject(output);
   if (!envelope || caseInsensitiveField(envelope, "success") !== true) return envelope ? "failure" : "malformed";
   const wrapper = getRecord(caseInsensitiveField(envelope, "data")) ?? envelope;
+  if (caseInsensitiveField(wrapper, "success") === false) return "failure";
   let response: unknown = caseInsensitiveField(wrapper, "result");
   // Legacy wrapper puts the documented RunScriptResponse in data.result; compact
   // transport puts it in result. A bare success envelope has no command evidence.
