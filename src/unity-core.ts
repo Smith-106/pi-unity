@@ -104,8 +104,8 @@ export function normalizeForCommandSearch(value: string, platform: SupportedPlat
   return platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-function realpathMatchesOnDarwin(candidatePath: string, projectRoot: string, platform: SupportedPlatform): boolean | null {
-  if (platform !== "darwin" || process.platform !== "darwin") {
+function realpathMatchesOnNativePlatform(candidatePath: string, projectRoot: string, platform: SupportedPlatform): boolean | null {
+  if ((platform !== "darwin" && platform !== "win32") || process.platform !== platform) {
     return null;
   }
 
@@ -113,7 +113,7 @@ function realpathMatchesOnDarwin(candidatePath: string, projectRoot: string, pla
     return realpathSync.native(candidatePath) === realpathSync.native(projectRoot);
   } catch {
     // Only use filesystem identity when both paths can be resolved. Falling back
-    // to the case-sensitive textual comparison preserves case-sensitive APFS.
+    // to the platform-specific textual comparison preserves existing behavior.
     return null;
   }
 }
@@ -130,7 +130,7 @@ export function projectPathsMatch(candidatePath: string, projectRoot: string, pl
     return false;
   }
 
-  const realpathMatch = realpathMatchesOnDarwin(trimmedCandidatePath, trimmedProjectRoot, comparisonPlatform);
+  const realpathMatch = realpathMatchesOnNativePlatform(trimmedCandidatePath, trimmedProjectRoot, comparisonPlatform);
   if (realpathMatch !== null) {
     return realpathMatch;
   }

@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdtemp, mkdir, symlink, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   applyDefaultUnityBatchmodeArgs,
   buildUnityBatchmodeArgs,
@@ -14,6 +17,22 @@ import {
 
 assert.equal(parseUnityVersionText("m_EditorVersion: 2022.3.18f1\n"), "2022.3.18f1");
 assert.equal(parseUnityVersionText("foo\nbar\n"), null);
+
+if (process.platform === "win32") {
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-path-alias-"));
+  try {
+    const project = join(root, "Project");
+    const alias = join(root, "Alias");
+    const other = join(root, "Other");
+    await mkdir(project);
+    await mkdir(other);
+    await symlink(project, alias, "junction");
+    assert(projectPathsMatch(alias, project), "Existing Windows aliases must identify the same physical project.");
+    assert(!projectPathsMatch(alias, other), "Canonical matching must not merge distinct projects.");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 assert.deepEqual(buildUnityOpenEditorArgs("/repo/game"), ["-projectPath", "/repo/game"], "Direct Editor launch omits -automated by default.");
 assert.deepEqual(buildUnityOpenEditorArgs("/repo/game", { automated: true }), ["-projectPath", "/repo/game", "-automated"], "Direct Editor launch includes -automated when requested.");
