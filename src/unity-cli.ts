@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import { applyDefaultUnityBatchmodeArgs, buildUnityBatchmodeArgs, projectPathsMatch } from "./unity-core";
 import type { RunningUnityProcess } from "./unity-processes";
 
@@ -265,10 +265,10 @@ export function parseUnityCliStatusOutput(output: string, projectRoot: string): 
 
 export async function listRunningUnityCliEditorsForProject(
   projectRoot: string,
-  options: { cliCommand?: string; timeout?: number } = {},
+  options: { cliCommand?: string; timeout?: number; execute?: UnityCliExecutor } = {},
 ): Promise<{ processes: RunningUnityProcess[]; warning?: string }> {
   const command = resolveUnityCliCommand(options);
-  const result = await execFileCollect(command, ["--format", "json", "--no-banner", "--non-interactive", "status", "--project", projectRoot], {
+  const result = await (options.execute ?? execFileCollect)(command, ["--format", "json", "--no-banner", "--non-interactive", "status", "--project", projectRoot], {
     timeout: options.timeout ?? 5000,
   });
 
@@ -277,11 +277,14 @@ export async function listRunningUnityCliEditorsForProject(
   }
 
   const processes = parseUnityCliStatusOutput(result.stdout, projectRoot);
-  if (processes.length > 0) {
-    return { processes };
-  }
-
   const payload = parseJsonObject(result.stdout);
+  const statusWarnings = envelopeMessages(payload, "warnings");
+  if (statusWarnings.length > 0) {
+    return { processes, warning: `Unity CLI status response is incomplete; process absence is uncertain: ${statusWarnings.join("; ")}` };
+  }
+  if (processes.length > 0) return { processes };
+
+
   const errors = Array.isArray(payload?.errors) ? payload.errors : [];
   const onlyNoInstances = errors.some((entry) => getRecord(entry)?.code === "STATUS_NO_INSTANCES");
   if (result.error && !onlyNoInstances) {
@@ -430,21 +433,22 @@ export function isUnityCliTimeout(result: Pick<UnityCliExecResult, "error">): bo
   return error?.code === "ETIMEDOUT" || error?.killed === true || error?.signal === "SIGTERM";
 }
 
+const UNITY_CLI_MAX_DIAGNOSTICS = 8;
 function envelopeMessages(payload: Record<string, unknown> | null, fieldName: "errors" | "warnings" | "info"): string[] {
   const entries = Array.isArray(payload?.[fieldName]) ? payload[fieldName] : [];
-  return entries.flatMap((entry): string[] => {
+  return entries.slice(0, UNITY_CLI_MAX_DIAGNOSTICS).flatMap((entry): string[] => {
     const item = getRecord(entry);
     const message = optionalString(item?.message, item?.detail, typeof entry === "string" ? entry : undefined);
-    return message ? [summarizeUnityCliText(message, 1_000, 10)] : [];
+    return message ? [redactUnityPlanningOutput(summarizeUnityCliText(message, 1_000, 10))] : [];
   });
 }
 
-/** Preserve bounded CLI envelope diagnostics; successful discovery with warnings is not confirmation. */
+/** Warnings make discovery incomplete; informational descriptor/envelope notes do not. */
 function cliEnvelopeDiagnostics(payload: Record<string, unknown> | null): string[] {
-  return [
-    ...envelopeMessages(payload, "warnings").map(message => `warning: ${message}`),
-    ...envelopeMessages(payload, "info").map(message => `info: ${message}`),
-  ];
+  return envelopeMessages(payload, "warnings").map(message => `warning: ${message}`);
+}
+function cliEnvelopeInfo(payload: Record<string, unknown> | null): string[] {
+  return envelopeMessages(payload, "info").map(message => `info: ${message}`);
 }
 
 function cliFailureMessage(result: UnityCliExecResult): string | undefined {
@@ -494,6 +498,7 @@ export async function inspectUnityCliProjectCapabilities(
   const pipelinePayload = parseJsonObject(pipelineResult.stdout);
   const pipelineData = getRecord(pipelinePayload?.data);
   const pipelineDiagnostics = cliEnvelopeDiagnostics(pipelinePayload);
+  result.warnings.push(...cliEnvelopeInfo(pipelinePayload));
   if (pipelineResult.error || pipelinePayload?.success !== true || !Array.isArray(pipelineData?.instances) || pipelineDiagnostics.length > 0) {
     result.pipelineDiscovery = isUnityCliTimeout(pipelineResult) ? "timeout" : "unavailable";
     const diagnostic = pipelineDiagnostics.join("; ") || cliFailureMessage(pipelineResult) || "malformed or unsupported JSON response";
@@ -519,7 +524,9 @@ export async function inspectUnityCliProjectCapabilities(
   result.commandDiscoveryAttempted = true;
   const listResult = await execute(command, ["--format", "json", "--no-banner", "--non-interactive", "list", "--project-path", projectRoot], { timeout: discoveryTimeout, signal: options.signal });
   const catalog = parseUnityCliCommandCatalog(listResult.stdout);
-  const commandDiagnostics = cliEnvelopeDiagnostics(parseJsonObject(listResult.stdout));
+  const listPayload = parseJsonObject(listResult.stdout);
+  const commandDiagnostics = cliEnvelopeDiagnostics(listPayload);
+  result.warnings.push(...cliEnvelopeInfo(listPayload));
   if (listResult.error || !catalog.valid || commandDiagnostics.length > 0) {
     result.commandDiscovery = isUnityCliTimeout(listResult) ? "timeout" : "unavailable";
     result.warnings.push(`Unity Pipeline command discovery for the exact project copy ${result.commandDiscovery === "timeout" ? "timed out; command availability is uncertain" : "is incomplete or failed; command availability is uncertain"}: ${commandDiagnostics.join("; ") || cliFailureMessage(listResult) || "malformed or unsupported JSON response"}`);
@@ -575,7 +582,6 @@ export type UnityPipelineRunScriptRequest = {
   entry?: string;
   args?: unknown[];
   dryRun?: boolean;
-  timeoutMilliseconds?: number;
 };
 
 function planningInspectionReadiness(capabilities: UnityCliProjectCapabilities): string | undefined {
@@ -590,6 +596,25 @@ function planningInspectionReadiness(capabilities: UnityCliProjectCapabilities):
 function caseInsensitiveField(record: Record<string, unknown>, name: string): unknown {
   const entry = Object.entries(record).find(([key]) => key.toLowerCase() === name.toLowerCase());
   return entry?.[1];
+}
+
+function runScriptCommandFailure(output: string): "malformed" | "failure" | undefined {
+  const envelope = parseJsonObject(output);
+  if (!envelope || caseInsensitiveField(envelope, "success") !== true) return envelope ? "failure" : "malformed";
+  const wrapper = getRecord(caseInsensitiveField(envelope, "data")) ?? envelope;
+  let response: unknown = caseInsensitiveField(wrapper, "result");
+  // Legacy wrapper puts the documented RunScriptResponse in data.result; compact
+  // transport puts it in result. A bare success envelope has no command evidence.
+  if (typeof response === "string") { try { response = JSON.parse(response); } catch { return "malformed"; } }
+  const result = getRecord(response);
+  if (!result || !Object.prototype.hasOwnProperty.call(result, "diagnostics") || !Array.isArray(caseInsensitiveField(result, "diagnostics"))) return "malformed";
+  if (caseInsensitiveField(result, "success") === false || caseInsensitiveField(result, "failed") === true) return "failure";
+  const diagnostics = caseInsensitiveField(result, "diagnostics") as unknown[];
+  if (diagnostics.some(item => {
+    const diagnostic = getRecord(item);
+    return String(caseInsensitiveField(diagnostic ?? {}, "severity") ?? "").toLowerCase() === "error";
+  })) return "failure";
+  return undefined;
 }
 
 function connectedCommandFailure(output: string, isEval: boolean): "malformed" | "failure" | undefined {
@@ -708,8 +733,10 @@ export async function dispatchUnityPipelineRunScript(
   try { projectRoot = await realpath(request.projectRoot); file = await realpath(request.file); } catch {
     return { outcome: "rejected", code: "run_script_path_unavailable", message: "The project root or existing script file could not be canonicalized." };
   }
-  const relativeFile = file.slice(projectRoot.length).replace(/^[\\/]+/, "");
-  if (!relativeFile || relativeFile.startsWith("..") || !/\.cs$/i.test(relativeFile)) return { outcome: "rejected", code: "run_script_file_invalid", message: "run_script requires one existing .cs file inside the exact project root." };
+  const relativeFile = relative(projectRoot, file);
+  let fileStats: Awaited<ReturnType<typeof stat>>;
+  try { fileStats = await stat(file); } catch { return { outcome: "rejected", code: "run_script_file_invalid", message: "run_script requires one readable existing C# file." }; }
+  if (!relativeFile || isAbsolute(relativeFile) || relativeFile === ".." || relativeFile.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || !fileStats.isFile() || !/\.cs$/i.test(relativeFile)) return { outcome: "rejected", code: "run_script_file_invalid", message: "run_script requires one existing .cs file inside the exact project root." };
   let serializedArgs: string;
   try { serializedArgs = JSON.stringify(request.args ?? []); } catch { return { outcome: "rejected", code: "run_script_args_invalid", message: "run_script arguments must be JSON-serializable." }; }
   if (serializedArgs === undefined || serializedArgs.length > 4_000 || (request.entry?.length ?? 0) > 500 || /[\u0000-\u001f\u007f]/.test(request.entry ?? "")) return { outcome: "rejected", code: "run_script_args_invalid", message: "run_script entry or JSON arguments exceed bounded request limits." };
@@ -723,7 +750,7 @@ export async function dispatchUnityPipelineRunScript(
   const execution = await options.execute(resolveUnityCliCommand({ cliCommand: options.cliCommand }), args, { timeout, signal: options.signal });
   const raw = [execution.stdout, execution.stderr].filter(Boolean).join("\n"); const output = summarizeUnityCliText(redactUnityPlanningOutput(raw), 4_000, 40);
   if (execution.error) return { outcome: "rejected", code: isUnityCliTimeout(execution) ? "run_script_timeout" : "run_script_failed", message: `run_script did not complete successfully; its effect may be uncertain.${output ? ` ${output}` : ""}` };
-  const failure = connectedCommandFailure(execution.stdout, false);
+  const failure = runScriptCommandFailure(execution.stdout);
   if (failure) return { outcome: "rejected", code: failure === "malformed" ? "run_script_malformed" : "run_script_reported_failure", message: `${failure === "malformed" ? "run_script returned malformed JSON evidence" : "run_script reported failure"}.${output ? ` ${output}` : ""}` };
   return { outcome: "dispatched", command: "run_script", output, truncated: output.length < raw.trim().length };
 }

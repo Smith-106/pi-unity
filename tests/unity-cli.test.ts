@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,9 +9,11 @@ import {
   createUnityCliRunCommand,
   createUnityCliTestCommand,
   dispatchUnityPlanningInspection,
+  dispatchUnityPipelineRunScript,
   haveSameKnownProcessIds,
   inspectUnityCliProjectCapabilities,
   isUnityCliTimeout,
+  listRunningUnityCliEditorsForProject,
   normalizeUnityCliForwardedArgs,
   parseUnityCliCommandListOutput,
   parseUnityCliPipelineListOutput,
@@ -186,6 +188,10 @@ try {
   await rm(packageProject, { recursive: true, force: true });
 }
 
+const warningStatus = await listRunningUnityCliEditorsForProject("/fixture/game", { execute: async () => ({ stdout: JSON.stringify({ success: true, warnings: [{ message: "partial status" }], data: { instances: [{ projectPath: "/fixture/game", pid: 4 }] } }), stderr: "" }) });
+assert.equal(warningStatus.processes.length, 1, "Known positive status instances are retained.");
+assert.match(warningStatus.warning ?? "", /absence is uncertain/, "Status warnings block launch-safe absence claims even with a positive instance.");
+
 const absentCapabilities = await inspectUnityCliProjectCapabilities("/fixture/closed", "6000.1.0f1", {
   execute: async (_command, args) => args.includes("--version")
     ? { stdout: "1.0.0", stderr: "" }
@@ -316,11 +322,41 @@ try {
   }, { execute, inspect: async () => planningCapabilities(42, ["arbitrary_read"]) });
   assert.equal(callerChosenCommand.outcome, "rejected", "Callers cannot self-declare arbitrary commands as planning reads.");
   if (callerChosenCommand.outcome === "rejected") assert.equal(callerChosenCommand.code, "planning_command_invalid");
+  const scriptDir = join(planningProject, "AgentScripts");
+  await mkdir(scriptDir); const scriptFile = join(scriptDir, "Build.cs"); await writeFile(scriptFile, "public static class Build { public static void Main() {} }");
+  const scriptCalls: string[][] = [];
+  const runScript = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile, entry: "Build.Main", args: ["ok", 2], dryRun: true }, {
+    inspect: async () => planningCapabilities(42, ["run_script"]),
+    execute: async (_command, args) => { scriptCalls.push(args); return { stdout: JSON.stringify({ success: true, result: { result: "ok", diagnostics: [], compileMs: 1, executeMs: 0 } }), stderr: "" }; },
+  });
+  assert.equal(runScript.outcome, "dispatched");
+  assert(scriptCalls[0]?.includes("AgentScripts/Build.cs") || scriptCalls[0]?.includes("AgentScripts\\Build.cs"));
+  assert(scriptCalls[0]?.includes("--dry_run") && scriptCalls[0]?.includes("--entry") && scriptCalls[0]?.includes('["ok",2]'));
+  for (const [label, file, code] of [["sibling", join(`${planningProject}Sibling`, "Attack.cs"), "run_script_file_invalid"], ["directory", join(planningProject, "NotAFile.cs"), "run_script_file_invalid"], ["missing", join(planningProject, "Missing.cs"), "run_script_path_unavailable"]] as const) {
+    if (label === "sibling") { await mkdir(`${planningProject}Sibling`, { recursive: true }); await writeFile(file, "class Attack {}"); }
+    if (label === "directory") await mkdir(file);
+    const rejected = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file }, { inspect: async () => planningCapabilities(42, ["run_script"]), execute: async () => { throw new Error("must not dispatch"); } });
+    assert.equal(rejected.outcome, "rejected", `${label} must be rejected before dispatch`); if (rejected.outcome === "rejected") assert.equal(rejected.code, code);
+  }
+  const outsideFile = join(`${planningProject}Sibling`, "Escape.cs"); await writeFile(outsideFile, "class Escape {}");
+  const linkedFile = join(scriptDir, "Escape.cs");
+  try {
+    await symlink(outsideFile, linkedFile, "file");
+    const symlinkRejected = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: linkedFile }, { inspect: async () => planningCapabilities(42, ["run_script"]), execute: async () => { throw new Error("symlink escape must not dispatch"); } });
+    assert.equal(symlinkRejected.outcome, "rejected", "Canonical symlink targets outside the exact project are rejected.");
+  } catch (error: any) {
+    assert(["EPERM", "EACCES"].includes(error?.code), "Only unavailable symlink privileges may skip the symlink fixture.");
+  }
+  for (const [stdout, code] of [[JSON.stringify({ success: true, result: { success: false, diagnostics: [] } }), "run_script_reported_failure"], [JSON.stringify({ success: true }), "run_script_malformed"], [JSON.stringify({ success: true, result: { result: "x", diagnostics: [{ severity: "error", message: "CS1" }] } }), "run_script_reported_failure"]] as const) {
+    const rejected = await dispatchUnityPipelineRunScript({ projectRoot: planningProject, unityVersion: "6000", file: scriptFile }, { inspect: async () => planningCapabilities(42, ["run_script"]), execute: async () => ({ stdout, stderr: "" }) });
+    assert.equal(rejected.outcome, "rejected"); if (rejected.outcome === "rejected") assert.equal(rejected.code, code);
+  }
   assert.equal(redactUnityPlanningOutput("token=abc123def456ghijkl and sk_abcdefghijklmnop"), "token= [redacted] and [redacted]");
   assert.equal(disconnected.outcome, "rejected");
   if (disconnected.outcome === "rejected") assert.equal(disconnected.code, "pipeline_not_reachable");
 } finally {
   await rm(planningProject, { recursive: true, force: true });
+  await rm(`${planningProject}Sibling`, { recursive: true, force: true });
 }
 
 const cliTest = createUnityCliTestCommand("/game", { testPlatform: "EditMode", testFilters: ["Game.Fast"], testCategories: ["Smoke"], retries: 2, shard: "1/4", coverage: true, reportPaths: { nunit: "/game/Logs/results.xml", junit: "/game/Logs/results.junit.xml", log: "/game/Logs/results.log" } });

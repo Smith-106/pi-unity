@@ -1736,7 +1736,6 @@ export default function freeUnityPi(pi: ExtensionAPI) {
         entry: params.entry,
         args: params.args,
         dryRun: params.dryRun,
-        timeoutMilliseconds: (params.timeoutSeconds ?? 30) * 1000,
       }, { execute: createPlanningUnityCliExecutor(pi), signal, timeout: (params.timeoutSeconds ?? 30) * 1000 });
       const text = result.outcome === "dispatched"
         ? `Unity Pipeline run_script ${params.dryRun ? "compile-only completed" : "completed"}.\n${result.output || "(no bounded output returned)"}`
