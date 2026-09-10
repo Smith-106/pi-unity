@@ -9,6 +9,10 @@ and this project follows semantic versioning for public package releases.
 
 ## 0.12.1 - 2026-09-10
 
+### Security
+
+- Update the development/test Pi baseline to 0.85.1 and refresh the lockfile to resolve patched `brace-expansion` 5.0.9 and `undici` 8.9.0. Consumer-managed Pi hosts must be updated separately; peer compatibility ranges are unchanged.
+
 ### Fixed
 
 - Clarify connected single-selector arguments and pre-dispatch rejection recipes; document serial independent-fixture calls with stop-on-uncertainty boundaries, backed by offline registered-tool contract tests (not model-planning or live-Editor evidence).
