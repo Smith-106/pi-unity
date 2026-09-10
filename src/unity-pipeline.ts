@@ -559,4 +559,3 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
   }
   throw timeoutMessage("tests");
 }
-

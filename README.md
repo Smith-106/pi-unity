@@ -238,7 +238,7 @@ The registry-clean `package-lock.json` is committed. Optional development packag
 
 Legacy Pipeline releases (including `0.3.1-exp.1`) assigned `Application.runInBackground = true`, which Unity persisted as `PlayerSettings.runInBackground` in `ProjectSettings/ProjectSettings.asset`. Pipeline 0.6 restores the original value around server start/stop. Review tracked settings changes when installing older releases; Pipeline 0.6 reports non-automated Editor state as descriptor `info` rather than a console warning.
 
-Pipeline 0.6 records local editor eval usage in `Library/Pipeline/eval-usage.jsonl`; raw source is not stored unless the Pipeline **Store Eval Source** setting is enabled. Unity CLI telemetry can be opted out with `UNITY_NO_CLI_INVOKED_TELEMETRY=1` without changing project settings. For installed CLI/skill information, use read-only `unity skill show --list` or `unity skill show --path <path>`.
+Pipeline 0.6 records local editor eval usage in `Library/Pipeline/eval-usage.jsonl`; raw source is not stored unless the Pipeline **Store Eval Source** setting is enabled. `UNITY_NO_CLI_INVOKED_TELEMETRY=1` opts out only of Unity CLI's per-invocation telemetry event; analytics and crash-reporting controls are separate and unchanged. Pipeline compact HTTP responses are accepted whether returned directly or inside the CLI's documented `data` wrapper; this does not assert that CLI wrapping has changed. For installed CLI/skill information, use read-only `unity skill show --list` or `unity skill show --path <path>`.
 
 ## License
 
