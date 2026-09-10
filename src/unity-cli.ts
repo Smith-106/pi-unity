@@ -647,11 +647,11 @@ export async function dispatchUnityPlanningInspection(
     ...(isEval ? [request.evalSnippet!.trim()] : request.args ?? []),
   ];
   const execution = await options.execute(command, args, { timeout: options.timeout ?? UNITY_CLI_DISCOVERY_TIMEOUT_MS, signal: options.signal });
-  if (execution.error) {
-    return { outcome: "rejected", code: isUnityCliTimeout(execution) ? "planning_command_timeout" : "planning_command_failed", message: "Connected command did not complete successfully; its effect may be uncertain." };
-  }
   const raw = [execution.stdout, execution.stderr].filter(Boolean).join("\n");
-  const output = redactUnityPlanningOutput(summarizeUnityCliText(raw, 4_000, 40));
+  const output = summarizeUnityCliText(redactUnityPlanningOutput(raw), 4_000, 40);
+  if (execution.error) {
+    return { outcome: "rejected", code: isUnityCliTimeout(execution) ? "planning_command_timeout" : "planning_command_failed", message: `Connected command did not complete successfully; its effect may be uncertain.${output ? ` ${output}` : ""}` };
+  }
   const reportedFailure = connectedCommandFailure(execution.stdout, isEval);
   if (reportedFailure) {
     return {

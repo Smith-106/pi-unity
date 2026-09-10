@@ -265,6 +265,28 @@ try {
     assert.equal(failed.outcome, "rejected", `${label} must not be reported as a passed dispatch.`);
     if (failed.outcome === "rejected") assert.equal(failed.code, expectedCode);
   }
+  for (const timedOut of [false, true]) {
+    let attempts = 0;
+    const failure = await dispatchUnityPlanningInspection({
+      projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "get_authoring_root",
+    }, {
+      inspect: async () => planningCapabilities(42),
+      execute: async () => {
+        attempts++;
+        return { stdout: "Update Pipeline to 0.6.0-exp.1 or newer.", stderr: "token=synthetic-private-token " + "x".repeat(5000), error: Object.assign(new Error("CLI failed"), { code: timedOut ? "ETIMEDOUT" : 1 }) };
+      },
+    });
+    assert.equal(attempts, 1, "Diagnostics must not cause retry or fallback.");
+    assert.equal(failure.outcome, "rejected");
+    if (failure.outcome === "rejected") {
+      assert.equal(failure.code, timedOut ? "planning_command_timeout" : "planning_command_failed");
+      assert.match(failure.message, /Update Pipeline to 0\.6\.0-exp\.1/);
+      assert.match(failure.message, /effect may be uncertain/);
+      assert.match(failure.message, /\[redacted\]/);
+      assert(!failure.message.includes("synthetic-private-token"));
+      assert(failure.message.length < 4200, "Failure diagnostics remain bounded.");
+    }
+  }
   const invalidEval = await dispatchUnityPlanningInspection({
     projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "",
   }, { execute, inspect: async () => planningCapabilities(42) });
