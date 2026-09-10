@@ -7,6 +7,8 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+## 0.13.0 - 2026-09-10
+
 ### Added
 
 - Added advertised `get_runtime_pipeline_settings` inspection and the bounded `unity_pipeline_run_script` tool for Pipeline 0.6 ephemeral in-memory compilation/execution of one existing project C# file. Hotpatch is intentionally out of scope.
