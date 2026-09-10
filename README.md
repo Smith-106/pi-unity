@@ -97,7 +97,7 @@ The connected compile and test tools:
 - poll internally with fixed deadlines and bounded backoff;
 - reject malformed or semantically failing nested results;
 - require a known positive test count and zero failures before reporting a pass;
-- discard passing-test records while retaining bounded failure diagnostics;
+- keep routine tool output compact while preserving connected test records in durable normalized JSON evidence;
 - detect pre-existing or clearly displaced test runs when available correlation fields permit it.
 
 Another connected client is not a project lock. When Pipeline returns stable correlation fields, conflicting status is reported as displaced and uncertain. If Pipeline omits stable run identity, a competing same-mode, same-filter run may be indistinguishable from the requested run; the tool cannot prove exclusive ownership from shared Editor status alone.

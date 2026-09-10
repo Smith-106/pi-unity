@@ -7,6 +7,8 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+## 0.12.1 - 2026-09-10
+
 ### Fixed
 
 - Clarify connected single-selector arguments and pre-dispatch rejection recipes; document serial independent-fixture calls with stop-on-uncertainty boundaries, backed by offline registered-tool contract tests (not model-planning or live-Editor evidence).
