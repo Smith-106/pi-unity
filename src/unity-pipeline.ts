@@ -471,6 +471,7 @@ function checkCorrelation(expected: Record<string, string>, actual: Record<strin
 }
 function passingCounts(state: NormalizedTest): { total: number; passed: number; failed: number; inconclusive?: number } | undefined {
   if (![state.total, state.passed, state.failed, state.inconclusive].every(value => value === undefined || (Number.isSafeInteger(value) && value >= 0))) return undefined;
+  if (state.testRecords?.some(test => !/^(?:passed|success)$/i.test(test.status))) return undefined;
   if (state.total === undefined || state.total <= 0 || state.passed === undefined || state.failed !== 0 || (state.inconclusive ?? 0) > 0) return undefined;
   if (state.passed + state.failed + (state.inconclusive ?? 0) !== state.total) return undefined;
   return { total: state.total, passed: state.passed, failed: state.failed, inconclusive: state.inconclusive };
@@ -550,9 +551,9 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
   const dispatchWarnings = pipelineEnvelopeWarnings(dispatched.stdout);
   let state = normalizeUnityPipelineTest(dispatched.stdout);
   if (state.state === "uncertain" || state.state === "inactive") throw new Error("Unity Pipeline test dispatch returned inactive, malformed, or uncertain evidence; test run may not have started.");
-  if (state.state === "failed" || state.state === "cancelled") throw terminalEvidence(state, `Unity ${request.testPlatform} tests ${state.state}: ${state.failures.join("; ") || state.state}.`, request, elapsed(start, now), dispatchWarnings);
   const requestedCorrelation = { mode: request.testPlatform, ...(request.testFilter ? { filter: request.testFilter } : {}) };
   if (!checkCorrelation(requestedCorrelation, state.correlation)) throw new Error("Unity Pipeline test dispatch reported a different mode or filter; operation state is uncertain.");
+  if (state.state === "failed" || state.state === "cancelled") throw terminalEvidence(state, `Unity ${request.testPlatform} tests ${state.state}: ${state.failures.join("; ") || state.state}.`, request, elapsed(start, now), dispatchWarnings);
   const expected = { ...requestedCorrelation, ...state.correlation };
   // Some Pipeline versions return a complete result directly from asynchronous dispatch.
   if (state.state === "completed") {

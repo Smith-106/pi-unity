@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -11,6 +11,7 @@ import { ExtensionRunner, initTheme } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import registerUnity from "../index";
 import { writeNormalizedUnityTestArtifact, type NormalizedUnityTestResult } from "../src/unity-tests";
+import { validateNormalizedUnityTestArtifact } from "../src/unity-artifact-inspection";
 
 initTheme("dark");
 
@@ -606,6 +607,80 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     assert.equal(logOnly.details.status, "passed");
     assert.equal(logOnly.details.testOutcome, undefined, "A loaded log alone is not test evidence.");
     assert.equal(dispatches, 0, "All artifact cases are read-only and offline.");
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+// Registered-tool U1 acceptance: only correlated terminal Pipeline responses may create a durable
+// non-passing artifact, and native tool_result must retain that evidence as an error.
+{
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-terminal-evidence-"));
+  try {
+    const project = join(root, "Game");
+    await mkdir(join(project, "ProjectSettings"), { recursive: true });
+    await mkdir(join(project, "Packages"));
+    await writeFile(join(project, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
+    await writeFile(join(project, "Packages", "manifest.json"), '{"dependencies":{"com.unity.pipeline":"0.3.0-exp.1"}}');
+    const canonical = await realpath(project);
+    const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
+    const invoke = async (terminal: any, polled = false) => {
+      const calls: string[][] = [];
+      const pi = fakePi(async (_command, args) => {
+        calls.push(args);
+        if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
+        if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+        if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+        const command = args[args.indexOf("--timeout") + 2];
+        const envelope = (result: any) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
+        if (command === "editor_status") return envelope({ status: "idle" });
+        if (command === "test_status") return envelope(polled && calls.filter(call => call[call.indexOf("--timeout") + 2] === "test_status").length > 1 ? terminal : { status: "no_tests" });
+        if (command === "run_tests") return envelope(polled ? { status: "running", mode: "editor", filter: "Synthetic.Target" } : terminal);
+        throw new Error(`Unexpected Pipeline command ${command}`);
+      });
+      registerUnity(pi as any);
+      const tool = pi.tools.find(item => item.name === "unity_run_tests");
+      return { result: await nativeToolResult(pi, tool, { path: project, testPlatform: "EditMode", execution: "connected", testFilters: ["Synthetic.Target"] }, ctx), calls };
+    };
+    for (const [terminal, polled, outcome] of [
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: {} }, false, "uncertain"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 0, passed: 0, failed: 0 } }, false, "uncertain"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1.5, passed: 1.5, failed: 0 } }, false, "uncertain"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: -1 } }, true, "uncertain"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: 0 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, true, "uncertain"],
+      [{ status: "failed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 0, failed: 1 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, false, "tests_failed"],
+      [{ status: "cancelled", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 0, failed: 0 } }, true, "cancelled"],
+    ] as const) {
+      const { result, calls } = await invoke(terminal, polled);
+      assert.equal(result.isError, true, `Terminal ${JSON.stringify(terminal)} polled=${polled} evidence is a native tool error: ${JSON.stringify(result.details)}`);
+      assert.equal(result.details.testResult.outcome, outcome);
+      assert.match(result.details.artifactPath, /^Logs\/pi-unity-tests-editmode-/);
+      const stored = validateNormalizedUnityTestArtifact(JSON.parse(await readFile(join(project, result.details.artifactPath), "utf8")));
+      assert.equal(stored.outcome, outcome);
+      assert(stored.diagnostics?.length, "Terminal observations are retained in schema-valid diagnostics.");
+      if (outcome === "uncertain") assert.deepEqual(stored.summary, {}, "Contradictory or invalid counts are never made authoritative.");
+      assert.equal(calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 1, "Terminal evidence never redispatches.");
+      assert(!calls.some(args => args.includes("open") || args.includes("run") || args.includes("test") || args.includes("editor_stop")), "Terminal evidence never changes lifecycle or route.");
+    }
+    for (const [terminal, polled] of [
+      [{ status: "failed", mode: "playmode", filter: "Other", summary: { total: 1, passed: 0, failed: 1 } }, false],
+      [{ status: "cancelled", mode: "playmode", filter: "Other", summary: { total: 1, passed: 0, failed: 0 } }, true],
+    ] as const) {
+      const before = await readdir(join(project, "Logs")).catch(() => [] as string[]);
+      const { result, calls } = await invoke(terminal, polled);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /different mode or filter|displaced/, "Mismatched terminal state is not attributed.");
+      const after = await readdir(join(project, "Logs")).catch(() => [] as string[]);
+      assert.deepEqual(after, before, "Mismatched direct/polled terminal state writes no artifact.");
+      assert.equal(calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 1);
+    }
+    const preflightPi = fakePi(async (_command, args) => {
+      if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
+      if (args.includes("pipeline")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+      if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+      const command = args[args.indexOf("--timeout") + 2];
+      return { code: 0, stdout: JSON.stringify({ success: true, data: { result: command === "editor_status" ? { status: "idle" } : { status: "running" } } }), stderr: "" };
+    });
+    registerUnity(preflightPi as any);
+    const preflightTool = preflightPi.tools.find(item => item.name === "unity_run_tests");
+    await assert.rejects(() => preflightTool.execute("preflight", { path: project, testPlatform: "EditMode", execution: "connected" }, undefined, undefined, ctx), /pre-existing/);
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 console.log("pi-unity reverse load-order, result-contract and delayed-shutdown registration tests passed");
