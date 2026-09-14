@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { projectPathsMatch } from "./unity-core";
+import { hasConsistentUnityTestCounts } from "./unity-artifact-inspection";
 import { redactUnityPlanningOutput, resolveUnityCliCommand, summarizeUnityCliText, unityCapabilityDiagnosticSuffix, type UnityCliExecResult, type UnityCliExecutor, type UnityCliProjectCapabilities } from "./unity-cli";
 
 /** Public limits are deliberately small enough that connected work cannot create an unbounded agent wait loop. */
@@ -37,7 +38,7 @@ export type UnityPipelineOperationDetails = {
 export type UnityPipelineTestRecord = { name: string; status: string; durationSeconds?: number; message?: string; stackTrace?: string };
 /** testRecords are terminal evidence for the caller's durable artifact only; do not expose them in tool details. */
 export type UnityPipelineOperationResult = { text: string; details: UnityPipelineOperationDetails; testRecords?: UnityPipelineTestRecord[] };
-export type UnityPipelineTerminalTestEvidence = { state: "completed" | "failed" | "cancelled"; reason: string; elapsedSeconds: number; selection: { platform: "EditMode" | "PlayMode"; filter?: string }; correlation: Record<string, string>; observations: string[]; testRecords: UnityPipelineTestRecord[]; warnings: string[] };
+export type UnityPipelineTerminalTestEvidence = { state: "completed" | "failed" | "cancelled"; outcome: "uncertain" | "tests_failed" | "run_error" | "cancelled"; reason: string; elapsedSeconds: number; selection: { platform: "EditMode" | "PlayMode"; filter?: string }; correlation: Record<string, string>; observations: string[]; testRecords: UnityPipelineTestRecord[]; warnings: string[] };
 /** Terminal Pipeline evidence can be durable and inspectable without being passing evidence. */
 export class UnityPipelineTerminalTestEvidenceError extends Error {
   constructor(readonly evidence: UnityPipelineTerminalTestEvidence) { super(evidence.reason); this.name = "UnityPipelineTerminalTestEvidenceError"; }
@@ -51,6 +52,8 @@ type NormalizedTest = {
   total?: number; passed?: number; failed?: number; inconclusive?: number; failures: string[];
   correlation: Record<string, string>;
   testRecords?: UnityPipelineTestRecord[];
+  testFailureEstablished: boolean;
+  runnerError: boolean;
 };
 
 type PipelineDependencies = {
@@ -273,19 +276,20 @@ function correlation(result: RecordValue): Record<string, string> {
 }
 export function normalizeUnityPipelineTest(output: string): NormalizedTest {
   const parsed = parseUnityPipelineEnvelope(output);
-  if (parsed.malformed) return { state: "uncertain", failures: [], correlation: {} };
+  if (parsed.malformed) return { state: "uncertain", failures: [], correlation: {}, testFailureEstablished: false, runnerError: false };
   const sum = summary(parsed.result);
   const total = number(field(sum ?? parsed.result, "total"));
   const passed = number(field(sum ?? parsed.result, "passed", "pass"));
   const failedCount = number(field(sum ?? parsed.result, "failed", "fail"));
   const inconclusive = number(field(sum ?? parsed.result, "inconclusive", "skipped"));
   const raw = statusOf(parsed.result);
-  const semanticFailed = !parsed.outerSuccess || hasSemanticFailure(parsed.result) || (failedCount ?? 0) > 0;
-  const state = semanticFailed || raw === "failed" || raw === "error" ? "failed" : raw === "cancelled" || raw === "canceled" ? "cancelled"
+  const testFailureEstablished = (Number.isSafeInteger(failedCount) && (failedCount ?? 0) > 0) || testFailures(parsed.result).length > 0;
+  const runnerError = !parsed.outerSuccess || raw === "failed" || raw === "error" || hasSemanticFailure(parsed.result);
+  const state = raw === "cancelled" || raw === "canceled" ? "cancelled" : testFailureEstablished || runnerError ? "failed"
     : raw === "no_tests" || raw === "idle" || raw === "not_started" || raw === "not_running" ? "inactive"
       : raw === "running" ? "running" : raw === "starting" || raw === "queued" ? "starting"
         : raw === "completed" || raw === "complete" || raw === "success" ? "completed" : "uncertain";
-  return { state, total, passed, failed: failedCount, inconclusive, failures: testFailures(parsed.result), correlation: correlation(parsed.result), testRecords: testRecords(parsed.result) };
+  return { state, total, passed, failed: failedCount, inconclusive, failures: testFailures(parsed.result), correlation: correlation(parsed.result), testRecords: testRecords(parsed.result), testFailureEstablished, runnerError };
 }
 
 function editorStopSucceeded(output: string): boolean {
@@ -470,15 +474,17 @@ function checkCorrelation(expected: Record<string, string>, actual: Record<strin
   return Object.entries(expected).every(([key, value]) => !actual[key] || actual[key] === value);
 }
 function passingCounts(state: NormalizedTest): { total: number; passed: number; failed: number; inconclusive?: number } | undefined {
-  if (![state.total, state.passed, state.failed, state.inconclusive].every(value => value === undefined || (Number.isSafeInteger(value) && value >= 0))) return undefined;
+  const summary = { total: state.total, passed: state.passed, failed: state.failed, inconclusive: state.inconclusive };
+  if (!hasConsistentUnityTestCounts(summary, state.testRecords ?? [])) return undefined;
   if (state.testRecords?.some(test => !/^(?:passed|success)$/i.test(test.status))) return undefined;
   if (state.total === undefined || state.total <= 0 || state.passed === undefined || state.failed !== 0 || (state.inconclusive ?? 0) > 0) return undefined;
   if (state.passed + state.failed + (state.inconclusive ?? 0) !== state.total) return undefined;
   return { total: state.total, passed: state.passed, failed: state.failed, inconclusive: state.inconclusive };
 }
 function terminalEvidence(state: NormalizedTest, reason: string, request: UnityPipelineTestRequest, elapsedSeconds: number, warnings: string[]): UnityPipelineTerminalTestEvidenceError {
-  const observations = [`terminal state=${state.state}`, ...["total", "passed", "failed", "inconclusive"].flatMap(key => state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">] === undefined ? [] : [`reported ${key}=${String(state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">])}`]), ...Object.entries(state.correlation).map(([key, value]) => `correlation ${key}=${value}`)].slice(0, UNITY_PIPELINE_MAX_DIAGNOSTICS);
-  return new UnityPipelineTerminalTestEvidenceError({ state: state.state as "completed" | "failed" | "cancelled", reason, elapsedSeconds, selection: { platform: request.testPlatform, ...(request.testFilter ?? request.testCategory ? { filter: request.testFilter ?? request.testCategory } : {}) }, correlation: state.correlation, observations, testRecords: state.testRecords ?? [], warnings });
+  const outcome = state.state === "cancelled" ? "cancelled" : state.testFailureEstablished ? "tests_failed" : state.runnerError ? "run_error" : "uncertain";
+  const observations = [`terminal state=${state.state}`, `terminal outcome=${outcome}`, ...["total", "passed", "failed", "inconclusive"].flatMap(key => state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">] === undefined ? [] : [`reported ${key}=${String(state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">])}`]), ...Object.entries(state.correlation).map(([key, value]) => `correlation ${key}=${value}`)].slice(0, UNITY_PIPELINE_MAX_DIAGNOSTICS);
+  return new UnityPipelineTerminalTestEvidenceError({ state: state.state as "completed" | "failed" | "cancelled", outcome, reason, elapsedSeconds, selection: { platform: request.testPlatform, ...(request.testFilter ?? request.testCategory ? { filter: request.testFilter ?? request.testCategory } : {}) }, correlation: state.correlation, observations, testRecords: state.testRecords ?? [], warnings });
 }
 function elapsed(start: number, now: () => number): number { return Math.max(0, (now() - start) / 1000); }
 function timeoutMessage(operation: string): Error { return new Error(`Unity Pipeline ${operation} timed out; result is uncertain and may still be running. No cancellation, retry, or route switch was performed.`); }

@@ -199,7 +199,7 @@ const INSPECT_ARTIFACTS_PARAMS = Type.Object({
   testResultsPath: Type.Optional(Type.String({ description: "Unity Test Framework XML results path. Relative paths are resolved against cwd and the Unity project root." })),
   normalizedResultPath: Type.Optional(Type.String({ description: "pi-unity normalized JSON test artifact path." })),
   logFilePath: Type.Optional(Type.String({ description: "Unity log file path. Relative paths are resolved against cwd and the Unity project root." })),
-  latestFromLogs: Type.Optional(Type.Boolean({ default: true, description: "Only when all artifact paths are omitted, inspect the newest .json, .xml and .log files under Logs. Latest files are not proof of a shared run." })),
+  latestFromLogs: Type.Optional(Type.Boolean({ default: true, description: "Only when all artifact paths are omitted, select one newest top-level Logs JSON (mtime then filename) and only its declared contained NUnit/log links. Without JSON, select newest XML alone, otherwise newest log context. Latest files are not proof of a shared run." })),
   maxLines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 60, description: "Maximum log/output lines to include." })),
   maxChars: Type.Optional(Type.Integer({ minimum: 500, maximum: 20000, default: 6000, description: "Maximum log/output characters to include." })),
 });
@@ -789,7 +789,13 @@ async function buildArtifactInspectionReport(
     }
     if ((normalized.outcome === "passed" || normalized.outcome === "passed_with_flakes") && parsedTestResults.failedTests.length > 0) evidenceErrors.push("Conflicting normalized/XML evidence: XML contains failed tests.");
     const linkedXml = normalized.backendArtifacts?.nunit;
-    if (linkedXml && resolve(candidate.projectRoot, linkedXml) !== resolve(testResultsPath!)) evidenceErrors.push("Conflicting artifact identity: selected XML is not the normalized artifact's nunit path.");
+    if (linkedXml && testResultsPath) {
+      try {
+        if (await resolveLinkedArtifact(candidate.projectRoot, linkedXml) !== await realpath(testResultsPath)) evidenceErrors.push("Conflicting artifact identity: selected XML is not the normalized artifact's nunit path.");
+      } catch (error) {
+        evidenceErrors.push(`Normalized NUnit link could not be resolved: ${linkedXml}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (!linkedXml) {
       evidenceWarnings.push("Normalized JSON and XML have no shared run identity; matching counts alone do not correlate these files.");
       testOutcome = "uncertain";
@@ -1255,7 +1261,7 @@ async function runUnifiedUnityTests(
       result = await runUnityPipelineTests({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), testPlatform: request.testPlatform, testFilter: request.testFilters[0], testCategory: request.testCategories[0], timeoutSeconds: request.timeoutSeconds, allowAutonomousExitPlayMode }, createPipelineDependencies(pi), { signal, onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }] }) });
     } catch (error) {
       if (!(error instanceof UnityPipelineTerminalTestEvidenceError)) throw error;
-      const outcome = error.evidence.state === "failed" ? "tests_failed" : error.evidence.state === "cancelled" ? "cancelled" : "uncertain";
+      const outcome = error.evidence.outcome;
       const normalized: NormalizedUnityTestResult = {
         schemaVersion: 1, source: "pipeline", platform: request.testPlatform,
         selection: { testFilters: request.testFilters, testCategories: request.testCategories },
@@ -1844,7 +1850,7 @@ export default function freeUnityPi(pi: ExtensionAPI) {
       "Use unity_inspect_artifacts after Unity failures when existing -testResults or -logFile artifacts need concise parsing without another Unity launch.",
       "Prefer unity_inspect_artifacts over ad hoc bash parsing of Unity XML/log files when paths are known or Logs/ contains recent artifacts.",
       "unity_inspect_artifacts does not launch Unity and is safe to use even when the Unity project is busy.",
-      "Inspect details.testOutcome, not inspection status, for test success. Passing evidence needs consistent positive passing counts; missing explicit paths and conflicting artifacts fail inspection. Latest files are not current-run identity.",
+      "Inspect details.testOutcome, not inspection status, for test success. Passing evidence needs consistent positive passing counts; missing explicit paths and conflicting artifacts fail inspection. With all paths omitted, latest selection uses one JSON and its contained declared links, otherwise XML alone then log context; explicit paths disable selection/link expansion. Latest files are not current-run identity.",
     ],
     parameters: INSPECT_ARTIFACTS_PARAMS,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {

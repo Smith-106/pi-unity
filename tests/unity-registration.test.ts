@@ -644,9 +644,11 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
       [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 0, passed: 0, failed: 0 } }, false, "uncertain"],
       [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1.5, passed: 1.5, failed: 0 } }, false, "uncertain"],
       [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: -1 } }, true, "uncertain"],
-      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: 0 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, true, "uncertain"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: 0 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, true, "tests_failed"],
+      [{ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: 0 }, tests: [{ name: "Synthetic.One", result: "Passed" }, { name: "Synthetic.Two", result: "Passed" }] }, false, "uncertain"],
       [{ status: "failed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 0, failed: 1 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, false, "tests_failed"],
-      [{ status: "cancelled", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 0, failed: 0 } }, true, "cancelled"],
+      [{ status: "error", mode: "editor", filter: "Synthetic.Target", error: "Synthetic runner initialization failed" }, true, "run_error"],
+      [{ status: "cancelled", mode: "editor", filter: "Synthetic.Target", summary: { total: 2, passed: 0, failed: 1 }, tests: [{ name: "Synthetic.Failed", result: "Failed" }] }, true, "cancelled"],
     ] as const) {
       const { result, calls } = await invoke(terminal, polled);
       assert.equal(result.isError, true, `Terminal ${JSON.stringify(terminal)} polled=${polled} evidence is a native tool error: ${JSON.stringify(result.details)}`);
@@ -702,6 +704,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     await writeFile(join(root, "Packages", "manifest.json"), "{\"dependencies\":{}}");
     const pi = fakePi(async () => { throw new Error("Inspection must not dispatch Unity"); }); registerUnity(pi as any);
     const tool = pi.tools.find(item => item.name === "unity_inspect_artifacts");
+    assert.match(tool.parameters.properties.latestFromLogs.description, /one newest top-level Logs JSON.*NUnit\/log links.*Without JSON.*XML alone.*log context/, "Registered schema describes the primary/link/fallback policy.");
     const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
     const inspect = (params: any = {}) => tool.execute("inspect", { path: root, ...params }, undefined, undefined, ctx);
     const valid = (outcome: NormalizedUnityTestResult["outcome"] = "passed", backendArtifacts?: Record<string, string>) => JSON.stringify({ schemaVersion: 1, source: "pipeline", platform: "EditMode", selection: { testFilters: [], testCategories: [] }, outcome, summary: outcome === "passed" ? { total: 1, passed: 1, failed: 0 } : {}, tests: [], ...(backendArtifacts ? { backendArtifacts } : {}) });
@@ -737,6 +740,13 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const logOnly = await inspect(); assert.equal(logOnly.details.testOutcome, undefined, "Log-only context establishes no test outcome.");
     await reset(); await assert.rejects(() => inspect(), /No valid Unity artifacts/); await assert.rejects(() => inspect({ latestFromLogs: false }), /No valid Unity artifacts/);
 
+    await reset(); await writeFile(join(logs, "actual.xml"), '<test-run total="1" passed="1" failed="0"></test-run>'); await writeFile(join(logs, "primary.json"), valid("passed", { nunit: "Logs/alias.xml" }));
+    try {
+      await symlink(join(logs, "actual.xml"), join(logs, "alias.xml"), "file");
+      const containedAlias = await inspect();
+      assert.equal(containedAlias.details.status, "passed", "Canonical contained aliases match their declared NUnit link.");
+      assert.match(containedAlias.content[0].text, /primary\.json/, "Primary JSON provenance remains visible.");
+    } catch (error: any) { assert(["EPERM", "EACCES"].includes(error?.code), `Only unavailable symlink privileges may skip contained-alias coverage: ${String(error)}`); }
     const outside = `${root}-outside.xml`;
     await reset(); await writeFile(outside, '<test-run total="1" passed="1" failed="0"></test-run>'); await writeFile(join(logs, "primary.json"), valid("passed", { nunit: "Logs/escape.xml" }));
     try {

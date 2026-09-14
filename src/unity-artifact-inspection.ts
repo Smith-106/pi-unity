@@ -9,6 +9,16 @@ const strings = (value: unknown): value is string[] => Array.isArray(value) && v
 const relativeId = (value: unknown): value is string => typeof value === "string" && !!value.trim()
   && !isAbsolute(value) && !/^(?:[A-Za-z]:|[\\/])/.test(value) && !value.split(/[\\/]/).includes("..") && !/\0/.test(value);
 
+/** Shared count/retained-record invariant for durable validation and Pipeline pass acceptance. */
+export function hasConsistentUnityTestCounts(summary: Record<string, unknown>, tests: Array<{ status: string }>): boolean {
+  const total = summary.total; const passed = summary.passed; const failed = summary.failed;
+  const skipped = summary.skipped; const inconclusive = summary.inconclusive;
+  if (![total, passed, failed, skipped, inconclusive].every(value => value === undefined || count(value))) return false;
+  if (count(total) && [passed, failed, skipped, inconclusive].reduce<number>((sum, value) => sum + (count(value) ? value : 0), 0) > total) return false;
+  if (count(total) && tests.length > total) return false;
+  return [["passed", passed], ["failed", failed], ["skipped", skipped], ["inconclusive", inconclusive]].every(([status, limit]) => !count(limit) || tests.filter(test => status === "passed" ? /^(?:passed|success)$/i.test(test.status) : test.status.toLowerCase() === status).length <= limit);
+}
+
 /** Read the durable schema, not a transport response. Missing optional counts remain unknown.
  * Test records may be bounded or absent: never require tests.length === summary.total.
  */
@@ -25,10 +35,7 @@ export function validateNormalizedUnityTestArtifact(value: unknown): NormalizedU
   for (const key of ["total", "passed", "failed", "skipped", "inconclusive"]) {
     if (summary[key] !== undefined && !count(summary[key])) invalid(`summary.${key} must be a non-negative integer`);
   }
-  if (count(summary.total)) {
-    const accounted = [summary.passed, summary.failed, summary.skipped, summary.inconclusive].reduce<number>((sum, item) => sum + (count(item) ? item : 0), 0);
-    if (accounted > summary.total) invalid("summary counts exceed total");
-  }
+  if (!hasConsistentUnityTestCounts(summary, [])) invalid("summary counts are inconsistent");
   if (!Array.isArray(result.tests)) invalid("tests must be an array");
   const tests = result.tests as unknown[];
   for (const test of tests) {
@@ -38,12 +45,8 @@ export function validateNormalizedUnityTestArtifact(value: unknown): NormalizedU
     if (item.durationSeconds !== undefined && !nonnegative(item.durationSeconds)) invalid("test durationSeconds must be non-negative");
     if (item.attempts !== undefined && (!count(item.attempts) || item.attempts < 1)) invalid("test attempts must be positive");
   }
-  if (count(summary.total) && tests.length > summary.total) invalid("test records exceed total");
+  if (!hasConsistentUnityTestCounts(summary, tests as Array<{ status: string }>)) invalid("test records conflict with summary counts");
   const typed = result as unknown as NormalizedUnityTestResult;
-  for (const [status, key] of [["passed", "passed"], ["failed", "failed"], ["skipped", "skipped"], ["inconclusive", "inconclusive"]] as const) {
-    const observed = typed.tests.filter(test => test.status.toLowerCase() === status).length;
-    if (count(summary[key]) && observed > summary[key]) invalid(`test records conflict with summary.${key}`);
-  }
   if (result.projectRelativeId !== undefined && !relativeId(result.projectRelativeId)) invalid("projectRelativeId must be project-relative");
   if (result.backendArtifacts !== undefined && (!record(result.backendArtifacts) || !Object.values(result.backendArtifacts).every(relativeId))) invalid("backendArtifacts must contain project-relative paths");
   if (result.diagnostics !== undefined && (!Array.isArray(result.diagnostics) || result.diagnostics.length > 8 || !result.diagnostics.every(item => typeof item === "string" && !!item.trim() && item.length <= 1_000))) invalid("diagnostics must contain at most eight bounded strings");
