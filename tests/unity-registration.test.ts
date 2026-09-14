@@ -621,7 +621,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     await writeFile(join(project, "Packages", "manifest.json"), '{"dependencies":{"com.unity.pipeline":"0.3.0-exp.1"}}');
     const canonical = await realpath(project);
     const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
-    const invoke = async (terminal: any, polled = false) => {
+    const invoke = async (terminal: any, polled = false, partialPoll?: any, preflight?: any) => {
       const calls: string[][] = [];
       const pi = fakePi(async (_command, args) => {
         calls.push(args);
@@ -631,7 +631,12 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
         const command = args[args.indexOf("--timeout") + 2];
         const envelope = (result: any) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
         if (command === "editor_status") return envelope({ status: "idle" });
-        if (command === "test_status") return envelope(polled && calls.filter(call => call[call.indexOf("--timeout") + 2] === "test_status").length > 1 ? terminal : { status: "no_tests" });
+        if (command === "test_status") {
+          const statusCalls = calls.filter(call => call[call.indexOf("--timeout") + 2] === "test_status").length;
+          if (preflight) return envelope(preflight);
+          if (polled && statusCalls > 1) return envelope(partialPoll && statusCalls === 2 ? partialPoll : terminal);
+          return envelope({ status: "no_tests" });
+        }
         if (command === "run_tests") return envelope(polled ? { status: "running", mode: "editor", filter: "Synthetic.Target" } : terminal);
         throw new Error(`Unexpected Pipeline command ${command}`);
       });
@@ -673,6 +678,26 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
       assert.deepEqual(after, before, "Mismatched direct/polled terminal state writes no artifact.");
       assert.equal(calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 1);
     }
+    for (const active of [
+      { status: "running", mode: "editor", filter: "Synthetic.Target", summary: { total: 2, passed: 0, failed: 0, skipped: 1 }, tests: [{ name: "Synthetic.Skipped", result: "Skipped" }] },
+      { status: "running", mode: "editor", filter: "Synthetic.Target", summary: { total: 2, passed: 0, failed: 0, inconclusive: 1 }, tests: [{ name: "Synthetic.Inconclusive", result: "Inconclusive" }] },
+      { status: "running", mode: "editor", filter: "Synthetic.Target", summary: { total: 2, passed: 0, failed: 1 }, tests: [{ name: "Synthetic.Unknown", result: "Unknown" }, { name: "Synthetic.Failed", result: "Failed" }] },
+    ]) {
+      const before = await readdir(join(project, "Logs"));
+      const { result, calls } = await invoke({ status: "completed", summary: {} }, false, undefined, active);
+      assert.equal(result.isError, true, "Active preflight remains a native error regardless of partial records.");
+      assert.match(result.content[0].text, /pre-existing connected Unity test run/);
+      assert.equal(calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 0, "Active preflight never dispatches a replacement run.");
+      assert.deepEqual(await readdir(join(project, "Logs")), before, "Active preflight writes no artifact.");
+    }
+    const polledPartial = await invoke(
+      { status: "completed", mode: "editor", filter: "Synthetic.Target", summary: { total: 1, passed: 1, failed: 0 }, tests: [{ name: "Synthetic.Terminal", result: "Passed" }] },
+      true,
+      { status: "running", mode: "editor", filter: "Synthetic.Target", summary: { total: 2, passed: 0, failed: 0, skipped: 1 }, tests: [{ name: "Synthetic.Skipped", result: "Skipped" }] },
+    );
+    assert.equal(polledPartial.result.isError, false, "Partial polling records wait for a correlated terminal response.");
+    assert.equal(polledPartial.result.details.testResult.outcome, "passed");
+    assert.equal(polledPartial.calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 1, "Polling partial evidence never redispatches.");
     const preflightPi = fakePi(async (_command, args) => {
       if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };

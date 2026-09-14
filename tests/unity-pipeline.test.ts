@@ -62,6 +62,13 @@ assert.equal(passing33.state, "completed");
 assert.equal(passing33.total, 33);
 assert.equal(passing33.testRecords?.length, 33, "Complete terminal records are retained only for immediate artifact persistence.");
 assert.deepEqual(passing33.failures, [], "Passing test names must not be retained.");
+for (const status of ["Skipped", "Inconclusive", "Unknown"]) {
+  const partial = normalizeUnityPipelineTest(envelope({ status: "completed", summary: { total: 1, passed: 0, failed: 0 }, tests: [{ name: `Synthetic.${status}`, result: status }] }));
+  assert.equal(partial.state, "completed", `${status} remains a terminal result, not a fabricated test failure.`);
+  assert.equal(partial.testFailureEstablished, false, `${status} is not recognized failed-test evidence.`);
+  const active = normalizeUnityPipelineTest(envelope({ status: "running", summary: { total: 2, passed: 0, failed: 0, skipped: 1 }, tests: [{ name: `Synthetic.${status}`, result: status }] }));
+  assert.equal(active.state, "running", `${status} partial record never overrides active state.`);
+}
 const twoFailures = normalizeUnityPipelineTest(envelope({ status: "completed", summary: { total: 2, passed: 0, failed: 2 }, tests: [{ name: "A", result: "Failed", message: "nope", stackTrace: "stack" }, { name: "B", result: "Inconclusive", message: "maybe" }] }));
 assert.equal(twoFailures.state, "failed");
 assert.equal(twoFailures.failures.length, 2);

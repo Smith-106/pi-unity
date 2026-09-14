@@ -237,6 +237,9 @@ function testRecords(result: RecordValue): UnityPipelineTestRecord[] {
   });
   return values.slice(0, 2_000);
 }
+function isRecognizedFailedTestStatus(status: string): boolean {
+  return status.trim().toLowerCase() === "failed";
+}
 function testFailures(result: RecordValue): string[] {
   const values: string[] = [];
   walk(result, item => {
@@ -246,7 +249,7 @@ function testFailures(result: RecordValue): string[] {
       for (const entry of entries.slice(0, 200)) {
         const test = record(entry); if (!test) continue;
         const outcome = string(field(test, "result", "status", "outcome"))?.toLowerCase();
-        if (!outcome || /pass|success/.test(outcome)) continue;
+        if (!outcome || /^(?:passed|success)$/i.test(outcome)) continue;
         const name = string(field(test, "name", "fullname", "testname")) ?? "Unnamed test";
         const message = string(field(test, "message", "error", "failuremessage"));
         const stack = string(field(test, "stacktrace", "stack", "trace"));
@@ -283,13 +286,16 @@ export function normalizeUnityPipelineTest(output: string): NormalizedTest {
   const failedCount = number(field(sum ?? parsed.result, "failed", "fail"));
   const inconclusive = number(field(sum ?? parsed.result, "inconclusive", "skipped"));
   const raw = statusOf(parsed.result);
-  const testFailureEstablished = (Number.isSafeInteger(failedCount) && (failedCount ?? 0) > 0) || testFailures(parsed.result).length > 0;
+  const records = testRecords(parsed.result);
+  const testFailureEstablished = (Number.isSafeInteger(failedCount) && (failedCount ?? 0) > 0) || records.some(test => isRecognizedFailedTestStatus(test.status));
   const runnerError = !parsed.outerSuccess || raw === "failed" || raw === "error" || hasSemanticFailure(parsed.result);
-  const state = raw === "cancelled" || raw === "canceled" ? "cancelled" : testFailureEstablished || runnerError ? "failed"
+  // A reported active state remains active even when it carries partial records/counts.
+  const state = raw === "cancelled" || raw === "canceled" ? "cancelled"
     : raw === "no_tests" || raw === "idle" || raw === "not_started" || raw === "not_running" ? "inactive"
       : raw === "running" ? "running" : raw === "starting" || raw === "queued" ? "starting"
-        : raw === "completed" || raw === "complete" || raw === "success" ? "completed" : "uncertain";
-  return { state, total, passed, failed: failedCount, inconclusive, failures: testFailures(parsed.result), correlation: correlation(parsed.result), testRecords: testRecords(parsed.result), testFailureEstablished, runnerError };
+        : raw === "completed" || raw === "complete" || raw === "success" ? testFailureEstablished || runnerError ? "failed" : "completed"
+          : testFailureEstablished || runnerError ? "failed" : "uncertain";
+  return { state, total, passed, failed: failedCount, inconclusive, failures: testFailures(parsed.result), correlation: correlation(parsed.result), testRecords: records, testFailureEstablished, runnerError };
 }
 
 function editorStopSucceeded(output: string): boolean {
