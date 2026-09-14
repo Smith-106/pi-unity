@@ -173,9 +173,9 @@ function statusOf(result: RecordValue): string | undefined {
   return string(value)?.toLowerCase().replace(/[\s-]+/g, "_");
 }
 function hasSemanticFailure(result: RecordValue): boolean {
-  let failed = field(result, "success") === false || field(result, "failed") === true || field(result, "compilationfailed") === true;
-  // Explicit boolean failure flags override a superficially terminal status; false and absent remain compatible with older payloads.
-  walk(result, item => { if (field(item, "success") === false || field(item, "failed") === true || field(item, "compilationfailed") === true) failed = true; });
+  let failed = field(result, "success") === false || field(result, "failed") === true;
+  // `success: false` is failure; `failed: false` is not.
+  walk(result, item => { if (field(item, "success") === false || field(item, "failed") === true) failed = true; });
   return failed;
 }
 function diagnostics(result: RecordValue): string[] {
@@ -207,7 +207,9 @@ export function normalizeUnityPipelineCompile(output: string): NormalizedCompile
   const parsed = parseUnityPipelineEnvelope(output);
   if (parsed.malformed) return { state: "uncertain", diagnostics: [], failed: false };
   const compilerDiagnostics = diagnostics(parsed.result);
-  const failed = !parsed.outerSuccess || hasSemanticFailure(parsed.result) || compilerDiagnostics.length > 0;
+  let compilationFailed = false;
+  walk(parsed.result, item => { if (field(item, "compilationfailed") === true) compilationFailed = true; });
+  const failed = !parsed.outerSuccess || hasSemanticFailure(parsed.result) || compilationFailed || compilerDiagnostics.length > 0;
   const raw = statusOf(parsed.result);
   const state = failed || raw === "failed" || raw === "error" ? "failed" : raw === "up_to_date" || raw === "uptodate" ? "up_to_date"
     : raw === "triggered" ? "triggered" : raw === "compiling" || raw === "running" ? "compiling"

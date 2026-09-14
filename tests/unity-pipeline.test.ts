@@ -53,6 +53,9 @@ assert.equal(normalizeUnityPipelineTest(envelope({ status: "no_tests", message: 
 assert.equal(normalizeUnityPipelineTest(envelope(JSON.stringify({ status: "no_tests" }))).state, "inactive", "Stringified no_tests is also inactive.");
 assert.equal(normalizeUnityPipelineTest(envelope({ status: "idle" })).state, "inactive");
 assert.equal(normalizeUnityPipelineTest(envelope({ status: "not_started" })).state, "inactive");
+const compilationFlagTest = normalizeUnityPipelineTest(envelope({ status: "completed", compilationFailed: true, summary: { total: 1, passed: 1, failed: 0 } }));
+assert.equal(compilationFlagTest.state, "completed", "compilationFailed is compile-only evidence and must not alter test normalization.");
+assert.equal(compilationFlagTest.runnerError, false, "compilationFailed must not be interpreted as a test runner failure.");
 assert.equal(normalizeUnityScriptChangesWhilePlaying("RecompileAndContinuePlaying"), "recompile_and_continue");
 assert.equal(normalizeUnityScriptChangesWhilePlaying("StopPlayingAndRecompile"), "stop_and_recompile");
 assert.equal(normalizeUnityScriptChangesWhilePlaying("RecompileAfterFinishedPlaying"), "defer");
