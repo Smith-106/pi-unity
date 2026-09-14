@@ -522,6 +522,10 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const linked = await artifact({ ...base, source: "unity-cli", backendArtifacts: { nunit: "Logs/exact.xml" } });
     const mixed = await inspect({ normalizedResultPath: linked, testResultsPath: xmlPath });
     assert.equal(mixed.details.testOutcome, "passed", "Matching linked native evidence is supported.");
+    const selectedLinked = await inspect({});
+    assert.equal(selectedLinked.details.normalizedResultPath?.endsWith(linked.split(/[\\/]/).pop()!), true, "Latest JSON is the sole primary selection.");
+    assert.equal(selectedLinked.details.artifacts.testResultsPath?.endsWith("exact.xml"), true, "Only the primary JSON's validated NUnit link is followed.");
+    assert.equal(selectedLinked.details.artifacts.logFilePath, undefined, "Unrelated newer logs are not automatically recruited.");
     const uncorrelated = await inspect({ normalizedResultPath: passing, testResultsPath: xmlPath });
     assert.equal(uncorrelated.details.testOutcome, "uncertain", "Matching counts alone do not establish shared run identity.");
     assert.match(uncorrelated.content[0].text, /no shared run identity/);

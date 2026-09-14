@@ -7,6 +7,11 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+### Fixed
+
+- Preserve durable normalized connected-test evidence for terminal failed, cancelled, and incomplete Pipeline results without replaying dispatch or misreporting uncertain counts as passing.
+- Select one primary latest normalized result and only its validated project-contained backend links when inspecting historical artifacts; clarify eval outer wait versus unverified handler and scheduler deadlines.
+
 ## 0.13.0 - 2026-09-10
 
 ### Added

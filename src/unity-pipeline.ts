@@ -37,6 +37,11 @@ export type UnityPipelineOperationDetails = {
 export type UnityPipelineTestRecord = { name: string; status: string; durationSeconds?: number; message?: string; stackTrace?: string };
 /** testRecords are terminal evidence for the caller's durable artifact only; do not expose them in tool details. */
 export type UnityPipelineOperationResult = { text: string; details: UnityPipelineOperationDetails; testRecords?: UnityPipelineTestRecord[] };
+export type UnityPipelineTerminalTestEvidence = { state: "completed" | "failed" | "cancelled"; reason: string; elapsedSeconds: number; selection: { platform: "EditMode" | "PlayMode"; filter?: string }; correlation: Record<string, string>; observations: string[]; testRecords: UnityPipelineTestRecord[]; warnings: string[] };
+/** Terminal Pipeline evidence can be durable and inspectable without being passing evidence. */
+export class UnityPipelineTerminalTestEvidenceError extends Error {
+  constructor(readonly evidence: UnityPipelineTerminalTestEvidence) { super(evidence.reason); this.name = "UnityPipelineTerminalTestEvidenceError"; }
+}
 
 type RecordValue = Record<string, unknown>;
 type ParsedEnvelope = { result: RecordValue; outerSuccess: boolean; malformed?: string };
@@ -465,9 +470,14 @@ function checkCorrelation(expected: Record<string, string>, actual: Record<strin
   return Object.entries(expected).every(([key, value]) => !actual[key] || actual[key] === value);
 }
 function passingCounts(state: NormalizedTest): { total: number; passed: number; failed: number; inconclusive?: number } | undefined {
+  if (![state.total, state.passed, state.failed, state.inconclusive].every(value => value === undefined || (Number.isSafeInteger(value) && value >= 0))) return undefined;
   if (state.total === undefined || state.total <= 0 || state.passed === undefined || state.failed !== 0 || (state.inconclusive ?? 0) > 0) return undefined;
   if (state.passed + state.failed + (state.inconclusive ?? 0) !== state.total) return undefined;
   return { total: state.total, passed: state.passed, failed: state.failed, inconclusive: state.inconclusive };
+}
+function terminalEvidence(state: NormalizedTest, reason: string, request: UnityPipelineTestRequest, elapsedSeconds: number, warnings: string[]): UnityPipelineTerminalTestEvidenceError {
+  const observations = [`terminal state=${state.state}`, ...["total", "passed", "failed", "inconclusive"].flatMap(key => state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">] === undefined ? [] : [`reported ${key}=${String(state[key as keyof Pick<NormalizedTest, "total" | "passed" | "failed" | "inconclusive">])}`]), ...Object.entries(state.correlation).map(([key, value]) => `correlation ${key}=${value}`)].slice(0, UNITY_PIPELINE_MAX_DIAGNOSTICS);
+  return new UnityPipelineTerminalTestEvidenceError({ state: state.state as "completed" | "failed" | "cancelled", reason, elapsedSeconds, selection: { platform: request.testPlatform, ...(request.testFilter ?? request.testCategory ? { filter: request.testFilter ?? request.testCategory } : {}) }, correlation: state.correlation, observations, testRecords: state.testRecords ?? [], warnings });
 }
 function elapsed(start: number, now: () => number): number { return Math.max(0, (now() - start) / 1000); }
 function timeoutMessage(operation: string): Error { return new Error(`Unity Pipeline ${operation} timed out; result is uncertain and may still be running. No cancellation, retry, or route switch was performed.`); }
@@ -540,14 +550,14 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
   const dispatchWarnings = pipelineEnvelopeWarnings(dispatched.stdout);
   let state = normalizeUnityPipelineTest(dispatched.stdout);
   if (state.state === "uncertain" || state.state === "inactive") throw new Error("Unity Pipeline test dispatch returned inactive, malformed, or uncertain evidence; test run may not have started.");
-  if (state.state === "failed" || state.state === "cancelled") throw new Error(`Unity ${request.testPlatform} tests failed: ${state.failures.join("; ") || state.state}.`);
+  if (state.state === "failed" || state.state === "cancelled") throw terminalEvidence(state, `Unity ${request.testPlatform} tests ${state.state}: ${state.failures.join("; ") || state.state}.`, request, elapsed(start, now), dispatchWarnings);
   const requestedCorrelation = { mode: request.testPlatform, ...(request.testFilter ? { filter: request.testFilter } : {}) };
   if (!checkCorrelation(requestedCorrelation, state.correlation)) throw new Error("Unity Pipeline test dispatch reported a different mode or filter; operation state is uncertain.");
   const expected = { ...requestedCorrelation, ...state.correlation };
   // Some Pipeline versions return a complete result directly from asynchronous dispatch.
   if (state.state === "completed") {
     const counts = passingCounts(state);
-    if (!counts) throw new Error("Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).");
+    if (!counts) throw terminalEvidence(state, "Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).", request, elapsed(start, now), dispatchWarnings);
     return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.${warningText(dispatchWarnings)}`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}) }, testRecords: state.testRecords };
   }
   for (let poll = 0; now() < deadline; poll += 1) {
@@ -565,12 +575,12 @@ export async function runUnityPipelineTests(request: UnityPipelineTestRequest, d
     retainWarnings(dispatchWarnings, response.stdout);
     state = normalizeUnityPipelineTest(response.stdout);
     if (!checkCorrelation(expected, state.correlation)) throw new Error("Unity Pipeline test status was displaced by a different run; operation state is uncertain.");
-    if (state.state === "failed" || state.state === "cancelled") throw new Error(`Unity ${request.testPlatform} tests failed: ${state.failures.join("; ") || state.state}.`);
+    if (state.state === "failed" || state.state === "cancelled") throw terminalEvidence(state, `Unity ${request.testPlatform} tests ${state.state}: ${state.failures.join("; ") || state.state}.`, request, elapsed(start, now), dispatchWarnings);
     if (state.state === "uncertain") throw new Error("Unity Pipeline test status is malformed or uncertain; operation may still be running.");
     if (state.state === "inactive") throw new Error("Unity Pipeline test status became inactive before a terminal result; operation state is uncertain.");
     if (state.state !== "completed") continue;
     const counts = passingCounts(state);
-    if (!counts) throw new Error("Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).");
+    if (!counts) throw terminalEvidence(state, "Unity test result is terminal but lacks passing evidence (consistent positive total, passed count, and reported zero failures).", request, elapsed(start, now), dispatchWarnings);
     return { text: `${lifecyclePrefix}Unity ${request.testPlatform} tests passed for ${projectRoot}: ${counts.total} executed, ${counts.passed} passed, 0 failed in ${elapsed(start, now).toFixed(2)}s.${warningText(dispatchWarnings)}`, details: { projectRoot, operation: "tests", terminalState: "completed", elapsedSeconds: elapsed(start, now), ...playModeDetails(preflight), testPlatform: request.testPlatform, testFilter: request.testFilter ?? request.testCategory, counts, ...(dispatchWarnings.length ? { warnings: dispatchWarnings } : {}) }, testRecords: state.testRecords };
   }
   throw timeoutMessage("tests");

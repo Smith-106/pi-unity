@@ -12,6 +12,7 @@ import {
   parseUnityPipelineEnvelope,
   runUnityPipelineRecompile,
   runUnityPipelineTests,
+  UnityPipelineTerminalTestEvidenceError,
 } from "../src/unity-pipeline";
 import type { UnityCliProjectCapabilities } from "../src/unity-cli";
 
@@ -325,6 +326,23 @@ try {
     inspect: async () => ({ ...capabilities(root), commandDiscoverySucceeded: false, commandDiscovery: "unavailable", warnings: ["Requires Pipeline 0.6.0-exp.1; token=secret"] }),
     canonicalize: async value => value,
   }), /Requires Pipeline 0\.6\.0-exp\.1; token= \[redacted\]/);
+
+  // Terminal evidence is returned to the connected wrapper rather than being discarded
+  // before it can create a durable non-passing artifact.
+  for (const summary of [
+    { total: 0, passed: 0, failed: 0 },
+    { total: 1.5, passed: 1.5, failed: 0 },
+    { total: 1, passed: 1, failed: -1 },
+  ]) {
+    await assert.rejects(() => runUnityPipelineTests({ projectRoot: root, unityVersion: "6000", testPlatform: "EditMode" }, {
+      execute: async (_command, args) => args.includes("editor_status") ? { stdout: envelope({ status: "idle" }), stderr: "" }
+        : args.includes("test_status") ? { stdout: envelope({ status: "no_tests" }), stderr: "" }
+          : { stdout: envelope({ status: "completed", summary }), stderr: "" },
+      inspect: async () => capabilities(root), canonicalize: async value => value,
+    }), (error: unknown) => error instanceof UnityPipelineTerminalTestEvidenceError
+      && error.evidence.state === "completed"
+      && error.evidence.observations.some(value => value.includes("reported total=")));
+  }
 
   const abort = new AbortController(); abort.abort();
   await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000" }, {

@@ -46,6 +46,7 @@ export function validateNormalizedUnityTestArtifact(value: unknown): NormalizedU
   }
   if (result.projectRelativeId !== undefined && !relativeId(result.projectRelativeId)) invalid("projectRelativeId must be project-relative");
   if (result.backendArtifacts !== undefined && (!record(result.backendArtifacts) || !Object.values(result.backendArtifacts).every(relativeId))) invalid("backendArtifacts must contain project-relative paths");
+  if (result.diagnostics !== undefined && (!Array.isArray(result.diagnostics) || result.diagnostics.length > 8 || !result.diagnostics.every(item => typeof item === "string" && !!item.trim() && item.length <= 1_000))) invalid("diagnostics must contain at most eight bounded strings");
   for (const key of ["startedAt", "completedAt"]) if (result[key] !== undefined && (typeof result[key] !== "string" || !Number.isFinite(Date.parse(result[key] as string)))) invalid(`${key} must be a timestamp`);
   if (typed.startedAt && typed.completedAt && Date.parse(typed.completedAt) < Date.parse(typed.startedAt)) invalid("completion precedes start");
   if (result.durationSeconds !== undefined && !nonnegative(result.durationSeconds)) invalid("durationSeconds must be non-negative");

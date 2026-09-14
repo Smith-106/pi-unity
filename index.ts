@@ -1,8 +1,8 @@
 import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { mkdir, readFile, readdir, stat, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { mkdir, readFile, readdir, realpath, stat, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getKeybindings, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
@@ -32,7 +32,7 @@ import { applyUnityCliRetrySummary, compactUnityTestSummary, defaultUnityTestRep
 import { validateNormalizedUnityTestArtifact } from "./src/unity-artifact-inspection";
 import { UNITY_TEST_MAX_ARTIFACT_BYTES } from "./src/unity-tests";
 import { auditUnityGuidance, type UnityGuidanceAuditResult } from "./src/unity-guidance-audit";
-import { runUnityPipelineRecompile, runUnityPipelineTests, type UnityPipelineOperationDetails } from "./src/unity-pipeline";
+import { runUnityPipelineRecompile, runUnityPipelineTests, UnityPipelineTerminalTestEvidenceError, type UnityPipelineOperationDetails } from "./src/unity-pipeline";
 import {
   createOptionalIntegrationRegistryV1,
   isOptionalIntegrationActive,
@@ -103,6 +103,9 @@ type UnityToolDetails = {
   pipelineEval?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
   pipelineRunScript?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
   pipeline?: UnityPipelineOperationDetails;
+  testResult?: NormalizedUnityTestResult;
+  artifactPath?: string;
+  route?: "connected" | "isolated";
 };
 
 const LAUNCHER_SCHEMA = Type.Optional(StringEnum(["auto", "unity-cli", "editor-executable"] as const, { description: "Launch backend. Defaults to auto, which prefers the Unity CLI and falls back to direct editor executable launch when the CLI is unavailable." }));
@@ -686,8 +689,9 @@ async function findNewestFile(root: string, suffixes: string[]): Promise<string 
   let entries: Awaited<ReturnType<typeof readdir>>;
   try {
     entries = await readdir(root, { withFileTypes: true });
-  } catch {
-    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 
   const files = await Promise.all(entries
@@ -697,7 +701,16 @@ async function findNewestFile(root: string, suffixes: string[]): Promise<string 
       const stats = await stat(fullPath);
       return { fullPath, mtimeMs: stats.mtimeMs };
     }));
-  return files.sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.fullPath;
+  return files.sort((left, right) => right.mtimeMs - left.mtimeMs || left.fullPath.localeCompare(right.fullPath))[0]?.fullPath;
+}
+
+async function resolveLinkedArtifact(projectRoot: string, linkPath: string): Promise<string> {
+  const canonicalRoot = await realpath(projectRoot);
+  const candidate = resolve(projectRoot, linkPath);
+  const canonicalCandidate = await realpath(candidate);
+  const relativePath = relative(canonicalRoot, canonicalCandidate);
+  if (!relativePath || isAbsolute(relativePath) || relativePath === ".." || relativePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) throw new Error(`Linked artifact escapes the project root: ${linkPath}`);
+  return canonicalCandidate;
 }
 
 function resolveArtifactPath(cwd: string, projectRoot: string, value: string | undefined): string | undefined {
@@ -726,12 +739,14 @@ async function buildArtifactInspectionReport(
   // An exact artifact request must not silently recruit unrelated latest evidence.
   const useLatest = params.latestFromLogs !== false && ![params.testResultsPath, params.logFilePath, params.normalizedResultPath].some(value => value?.trim());
   const logsRoot = join(candidate.projectRoot, "Logs");
-  const testResultsPath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.testResultsPath)
-    ?? (useLatest ? await findNewestFile(logsRoot, [".xml"]) : undefined);
-  const logFilePath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.logFilePath)
-    ?? (useLatest ? await findNewestFile(logsRoot, [".log", ".txt"]) : undefined);
+  let testResultsPath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.testResultsPath);
+  let logFilePath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.logFilePath);
   const normalizedResultPath = resolveArtifactPath(ctx.cwd, candidate.projectRoot, params.normalizedResultPath)
     ?? (useLatest ? await findNewestFile(logsRoot, [".json"]) : undefined);
+  if (useLatest && !normalizedResultPath) {
+    testResultsPath = await findNewestFile(logsRoot, [".xml"]);
+    if (!testResultsPath) logFilePath = await findNewestFile(logsRoot, [".log", ".txt"]);
+  }
   let normalized: NormalizedUnityTestResult | undefined;
   const evidenceErrors: string[] = [];
   const evidenceWarnings: string[] = [];
@@ -739,6 +754,11 @@ async function buildArtifactInspectionReport(
     try {
       if ((await stat(normalizedResultPath)).size > UNITY_TEST_MAX_ARTIFACT_BYTES) throw new Error("Normalized artifact exceeds its size limit.");
       normalized = validateNormalizedUnityTestArtifact(JSON.parse(await readFile(normalizedResultPath, "utf8")));
+      // Stored backend links, not unrelated directory recency, are the only automatic companions.
+      if (useLatest) {
+        if (normalized.backendArtifacts?.nunit) testResultsPath = await resolveLinkedArtifact(candidate.projectRoot, normalized.backendArtifacts.nunit);
+        if (normalized.backendArtifacts?.log) logFilePath = await resolveLinkedArtifact(candidate.projectRoot, normalized.backendArtifacts.log);
+      }
     } catch (error) {
       evidenceErrors.push(`Normalized test result could not be loaded/validated: ${normalizedResultPath}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1230,7 +1250,25 @@ async function runUnifiedUnityTests(
   }
   const formats = request.reportFormats ?? defaultUnityTestReportFormats(route);
   if (route === "connected") {
-    const result = await runUnityPipelineTests({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), testPlatform: request.testPlatform, testFilter: request.testFilters[0], testCategory: request.testCategories[0], timeoutSeconds: request.timeoutSeconds, allowAutonomousExitPlayMode }, createPipelineDependencies(pi), { signal, onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }] }) });
+    let result;
+    try {
+      result = await runUnityPipelineTests({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), testPlatform: request.testPlatform, testFilter: request.testFilters[0], testCategory: request.testCategories[0], timeoutSeconds: request.timeoutSeconds, allowAutonomousExitPlayMode }, createPipelineDependencies(pi), { signal, onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }] }) });
+    } catch (error) {
+      if (!(error instanceof UnityPipelineTerminalTestEvidenceError)) throw error;
+      const outcome = error.evidence.state === "failed" ? "tests_failed" : error.evidence.state === "cancelled" ? "cancelled" : "uncertain";
+      const normalized: NormalizedUnityTestResult = {
+        schemaVersion: 1, source: "pipeline", platform: request.testPlatform,
+        selection: { testFilters: request.testFilters, testCategories: request.testCategories },
+        durationSeconds: error.evidence.elapsedSeconds, outcome, summary: {}, tests: error.evidence.testRecords,
+        diagnostics: [error.evidence.reason, ...error.evidence.observations, ...error.evidence.warnings].slice(0, 8),
+      };
+      let artifactPath: string;
+      try { artifactPath = await writeNormalizedUnityTestArtifact(candidate.projectRoot, normalized); } catch (persistenceError) {
+        throw new Error(`${error.evidence.reason} Durable terminal evidence could not be persisted: ${persistenceError instanceof Error ? persistenceError.message : String(persistenceError)}`);
+      }
+      const text = `${compactUnityTestSummary(normalized)}\nRoute: connected Pipeline. Terminal evidence was incomplete or non-passing; no retry, fallback, or replay was performed. Normalized artifact: ${artifactPath}`;
+      return { content: [{ type: "text", text }], details: { mode: "tests", projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), editorPath: "", status: "failed", testResult: { ...normalized, tests: [] }, artifactPath, route } };
+    }
     const counts = result.details.counts!;
     const normalized: NormalizedUnityTestResult = {
       schemaVersion: 1, source: "pipeline", platform: request.testPlatform,
@@ -1404,7 +1442,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     const details = event.details as UnityToolDetails | undefined;
     if ((event.toolName === "unity_pipeline_eval" && details?.mode === "pipeline_eval" && details.pipelineEval?.outcome === "rejected")
       || (event.toolName === "unity_pipeline_inspect" && details?.mode === "pipeline_inspection" && details.pipelineInspection?.outcome === "rejected")
-      || (event.toolName === "unity_pipeline_run_script" && details?.mode === "pipeline_run_script" && details.pipelineRunScript?.outcome === "rejected")) {
+      || (event.toolName === "unity_pipeline_run_script" && details?.mode === "pipeline_run_script" && details.pipelineRunScript?.outcome === "rejected")
+      || (event.toolName === "unity_run_tests" && details?.mode === "tests" && details.testResult?.outcome !== "passed" && details.testResult?.outcome !== "passed_with_flakes" && details.testResult?.outcome !== "empty_selection")) {
       return { isError: true };
     }
   });
@@ -1667,12 +1706,13 @@ export default function freeUnityPi(pi: ExtensionAPI) {
   pi.registerTool({
     name: "unity_pipeline_eval",
     label: "Unity Pipeline Eval",
-    description: "Execute one bounded C# snippet through advertised eval in an already-open exact Unity Pipeline Editor.",
+    description: "Execute one bounded C# snippet through advertised eval in an already-open exact Unity Pipeline Editor. timeoutSeconds bounds pi-unity and Unity CLI waits; handler/server deadline effects remain diagnostic unless verified by the installed Pipeline contract.",
     promptSnippet: "Query or operate on an already-open exact Unity project through Pipeline's Roslyn C# REPL.",
     promptGuidelines: [
       "Use unity_pipeline_eval for project-specific properties, APIs, and operations that advertised typed commands do not cover. It revalidates exact-copy identity and advertised eval immediately before dispatch.",
       "Pipeline eval compiles arbitrary C# with Roslyn on the Editor main thread. Include an explicit return value for observable evidence; normal property reads and local-variable snippets are supported.",
       "Eval is not statically read-only. Follow user intent and project guidance, and obtain explicit authorization before lifecycle, persistent-setting, destructive, asset, scene-save, package, build, or test mutations.",
+      "timeoutSeconds bounds the host and Unity CLI wait. It does not by itself prove the eval handler or main-thread scheduler deadline changed; classify a timeout layer only from verified diagnostics.",
       "A rejected, malformed, failing, or timed-out eval is not success; do not silently retry it through another route.",
     ],
     parameters: PIPELINE_EVAL_PARAMS,

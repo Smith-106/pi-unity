@@ -34,7 +34,7 @@ Use these tools with an already-open exact Unity project copy that has a reachab
 - `unity_project_status` — inspect lockfiles, matching Unity processes, Pipeline reachability, package version, and advertised commands without launching Unity.
 - `unity_pipeline_recompile` — recompile through Pipeline with exact-copy preflight, bounded polling, and compact compiler evidence.
 - `unity_run_tests` — one intent-oriented EditMode or PlayMode workflow. It reuses compatible connected Pipeline execution or selects isolated `unity test` when the exact project copy is closed.
-- `unity_pipeline_eval` — execute bounded project-specific C# through Pipeline's Roslyn REPL. It accepts `timeoutSeconds` from 1–86,400 seconds; a timeout is uncertain and does not cancel or retry Editor work.
+- `unity_pipeline_eval` — execute bounded project-specific C# through Pipeline's Roslyn REPL. `timeoutSeconds` bounds pi-unity and Unity CLI waits (1–86,400 seconds); it does not alone prove a handler or main-thread scheduler deadline changed. A timeout is uncertain and does not cancel or retry Editor work.
 - `unity_pipeline_inspect` — dispatch supported package-owned inspection commands (including read-only `get_runtime_pipeline_settings`) and return structured evidence. Runtime settings are refused by Pipeline in Play Mode; pi-unity never exits Play Mode to read them.
 - `unity_pipeline_run_script` — compile one existing project `.cs` file in Pipeline's ephemeral in-memory mode and invoke a named static entry point; supports bounded JSON arguments and compile-only `dryRun`. It deliberately does not expose hotpatch.
 

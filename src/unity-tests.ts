@@ -60,6 +60,8 @@ export type NormalizedUnityTestResult = {
   tests: NormalizedUnityTest[];
   flakyTests?: Array<{ name: string; attempts: number }>;
   backendArtifacts?: Record<string, string>;
+  /** Bounded non-authoritative observations retained when terminal Pipeline evidence cannot establish a result. */
+  diagnostics?: string[];
 };
 
 export type UnityTestRouteRequirements = { requiresIsolation: boolean; reasons: string[] };
@@ -250,6 +252,7 @@ export function normalizeUnityTestResult(result: NormalizedUnityTestResult): Nor
     summary: Object.fromEntries(Object.entries(result.summary).flatMap(([key, value]) => numberOrUndefined(value) === undefined ? [] : [[key, numberOrUndefined(value)!]])),
     tests, ...(result.flakyTests ? { flakyTests: result.flakyTests.slice(0, UNITY_TEST_MAX_TESTS).map(item => ({ name: bound(item.name, 1_000) || "Unnamed test", attempts: Math.max(1, Math.floor(item.attempts)) })) } : {}),
     ...(Object.keys(artifacts).length ? { backendArtifacts: artifacts } : {}),
+    ...(result.diagnostics ? { diagnostics: result.diagnostics.slice(0, 8).flatMap(value => typeof value === "string" ? [bound(value, 1_000) || ""] : []).filter(Boolean) } : {}),
   };
 }
 
