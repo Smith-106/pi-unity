@@ -173,9 +173,9 @@ function statusOf(result: RecordValue): string | undefined {
   return string(value)?.toLowerCase().replace(/[\s-]+/g, "_");
 }
 function hasSemanticFailure(result: RecordValue): boolean {
-  let failed = field(result, "success") === false || field(result, "failed") === true;
-  // `success: false` is failure; `failed: false` is not.
-  walk(result, item => { if (field(item, "success") === false || field(item, "failed") === true) failed = true; });
+  let failed = field(result, "success") === false || field(result, "failed") === true || field(result, "compilationfailed") === true;
+  // Explicit boolean failure flags override a superficially terminal status; false and absent remain compatible with older payloads.
+  walk(result, item => { if (field(item, "success") === false || field(item, "failed") === true || field(item, "compilationfailed") === true) failed = true; });
   return failed;
 }
 function diagnostics(result: RecordValue): string[] {

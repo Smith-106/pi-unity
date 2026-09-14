@@ -12,6 +12,7 @@ and this project follows semantic versioning for public package releases.
 - Preserve durable normalized connected-test evidence for terminal failed, cancelled, runner-error, and incomplete Pipeline results without replaying dispatch, overriding active Pipeline state from partial records, or misreporting inconsistent counts/records as passing.
 - Select one primary latest normalized result and only its validated project-contained backend links when inspecting historical artifacts, including canonical contained aliases.
 - Forward optional `unity_pipeline_eval.handlerTimeoutMilliseconds` only when the exact reachable Pipeline descriptor confirms raw argv support and the documented `code`/`timeout` signature. Preserve `timeoutSeconds` as the separate host/CLI wait; a dispatcher expiry cannot cancel eval code already started on Unity's main thread, so effects remain uncertain and are never retried or rerouted.
+- Treat Pipeline 0.7's explicit `compilationFailed: true` response as a failed recompile even when its status is `up_to_date` or `completed` and no compiler-error array is present.
 
 ## 0.13.0 - 2026-09-10
 

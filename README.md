@@ -40,7 +40,7 @@ Use these tools with an already-open exact Unity project copy that has a reachab
 
 Connected recompilation follows Unity's Script Changes While Playing policy and never preemptively sends `editor_stop`. Connected tests may exit Play Mode through advertised `editor_stop` when necessary, then verify Edit Mode before dispatch. Play Mode exit is allowed by default; `/unity-playmode-exit allow|disallow|status` controls the current session.
 
-A timeout is uncertain: work may still be running. The tools do not silently cancel, retry, launch another Editor, or switch to batchmode. Pipeline 0.6 can report busy for a modal dialog as well as startup settling, so ambiguous busy responses are surfaced and never blindly retried.
+A timeout is uncertain: work may still be running. The tools do not silently cancel, retry, launch another Editor, or switch to batchmode. Pipeline 0.6 can report busy for a modal dialog as well as startup settling, so ambiguous busy responses are surfaced and never blindly retried. Pipeline 0.7 improves recovery of standing compile errors and console output. For non-development Player builds, Pipeline also requires the `ENABLE_RUNTIME_PIPELINE` scripting define; enabling its runtime setting alone is insufficient.
 
 ### Editor and batchmode
 

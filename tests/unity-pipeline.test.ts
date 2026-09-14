@@ -30,6 +30,9 @@ assert.deepEqual(createUnityPipelineCommand("/Game", "run_tests", ["--mode", "ed
 ]);
 assert.deepEqual(UNITY_PIPELINE_BACKOFF_SECONDS, [1, 2, 3, 5, 8]);
 assert.equal(normalizeUnityPipelineCompile(envelope({ status: "up_to_date" })).state, "up_to_date");
+assert.equal(normalizeUnityPipelineCompile(envelope({ status: "up_to_date", compilationFailed: false })).state, "up_to_date", "An explicit false compilationFailed flag remains compatible with older successful payloads.");
+assert.equal(normalizeUnityPipelineCompile(envelope({ status: "completed" })).state, "completed", "A missing compilationFailed flag remains compatible with older successful payloads.");
+assert.equal(normalizeUnityPipelineCompile(envelope({ status: "completed", compilationFailed: true })).state, "failed", "Pipeline 0.7 compilationFailed overrides a terminal compile status.");
 assert.equal(normalizeUnityPipelineCompile(JSON.stringify({ success: true, result: { status: "up_to_date" }, warnings: [{ message: "corrected option" }] })).state, "up_to_date", "Compact 0.6 warnings are not compiler errors.");
 const failedCompile = normalizeUnityPipelineCompile(envelope({ status: "completed", failed: true, compilerErrors: [{ message: "CS1001" }, { message: "CS1001" }] }));
 assert.equal(failedCompile.state, "failed");
@@ -96,6 +99,20 @@ try {
   });
   assert.match(result.text, /completed/);
   assert.equal(result.details.compilationTriggered, true);
+
+  // Pipeline 0.7's explicit compiler flag must reject an otherwise successful direct response.
+  await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000.1.0f1" }, {
+    execute: async (_command, args) => ({ stdout: args.includes("editor_status") ? envelope({ status: "idle" }) : envelope({ status: "up_to_date", compilationFailed: true }), stderr: "" }),
+    inspect: async () => capabilities(root), canonicalize: async value => value,
+  }), /Unity recompile failed/);
+
+  // The same flag on a completed poll must never produce a successful compile result.
+  clock = 0;
+  await assert.rejects(() => runUnityPipelineRecompile({ projectRoot: root, unityVersion: "6000.1.0f1" }, {
+    execute: async (_command, args) => ({ stdout: args.includes("editor_status") ? envelope({ status: "idle" }) : args.includes("recompile") && !args.includes("recompile_status") ? envelope({ status: "triggered" }) : envelope({ status: "completed", compilationFailed: true }), stderr: "" }),
+    inspect: async () => capabilities(root), canonicalize: async value => value,
+    now: () => clock, sleep: async ms => { clock += ms; },
+  }), /Unity recompile failed/);
 
   // A temporary domain-reload disconnect is rediscovered only for the same canonical copy.
   clock = 0; let discovery = 0;
