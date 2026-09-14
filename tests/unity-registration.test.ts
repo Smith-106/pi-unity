@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -682,6 +682,60 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const preflightTool = preflightPi.tools.find(item => item.name === "unity_run_tests");
     await assert.rejects(() => preflightTool.execute("preflight", { path: project, testPlatform: "EditMode", execution: "connected" }, undefined, undefined, ctx), /pre-existing/);
   } finally { await rm(root, { recursive: true, force: true }); }
+}
+// U2 acceptance uses the public inspection tool so selection and link failures cannot be
+// hidden by a helper-only test. Windows ACL permission denial is intentionally not asserted:
+// chmod does not reliably remove the current user's directory access on that platform.
+{
+  const root = await mkdtemp(join(tmpdir(), "pi-unity-primary-artifact-"));
+  try {
+    await mkdir(join(root, "ProjectSettings")); await mkdir(join(root, "Packages")); await mkdir(join(root, "Logs"));
+    await writeFile(join(root, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
+    await writeFile(join(root, "Packages", "manifest.json"), "{\"dependencies\":{}}");
+    const pi = fakePi(async () => { throw new Error("Inspection must not dispatch Unity"); }); registerUnity(pi as any);
+    const tool = pi.tools.find(item => item.name === "unity_inspect_artifacts");
+    const ctx = { cwd: root, sessionManager: {}, mode: "print", hasUI: false, ui: {} };
+    const inspect = (params: any = {}) => tool.execute("inspect", { path: root, ...params }, undefined, undefined, ctx);
+    const valid = (outcome: NormalizedUnityTestResult["outcome"] = "passed", backendArtifacts?: Record<string, string>) => JSON.stringify({ schemaVersion: 1, source: "pipeline", platform: "EditMode", selection: { testFilters: [], testCategories: [] }, outcome, summary: outcome === "passed" ? { total: 1, passed: 1, failed: 0 } : {}, tests: [], ...(backendArtifacts ? { backendArtifacts } : {}) });
+    const logs = join(root, "Logs");
+    const reset = async () => { await rm(logs, { recursive: true, force: true }); await mkdir(logs); };
+    const stamp = new Date("2026-09-14T12:00:00.000Z");
+
+    await writeFile(join(logs, "older.json"), valid()); await utimes(join(logs, "older.json"), stamp, stamp);
+    await writeFile(join(logs, "newer.json"), "{"); await utimes(join(logs, "newer.json"), new Date(+stamp + 1_000), new Date(+stamp + 1_000));
+    await assert.rejects(() => inspect(), /newer\.json/, "Corrupt newest JSON must not fall back to older evidence.");
+    await writeFile(join(logs, "newer.json"), "x".repeat(2_000_001));
+    await assert.rejects(() => inspect(), /newer\.json.*size limit/, "Oversized newest JSON remains the visible primary failure.");
+
+    await reset(); await writeFile(join(logs, "primary.json"), valid("passed", { nunit: "Logs/missing.xml", log: "Logs/missing.log" }));
+    await assert.rejects(() => inspect(), /primary\.json.*missing/, "Missing declared links fail without recruiting unrelated files.");
+    await writeFile(join(logs, "unrelated.xml"), '<test-run total="1" passed="1" failed="0"></test-run>');
+    await writeFile(join(logs, "unrelated.log"), "unrelated");
+    await assert.rejects(() => inspect(), /missing/, "Unrelated XML/log files do not repair a missing declared link.");
+
+    await reset(); await writeFile(join(logs, "b.json"), valid("uncertain")); await writeFile(join(logs, "a.json"), valid());
+    await utimes(join(logs, "a.json"), stamp, stamp); await utimes(join(logs, "b.json"), stamp, stamp);
+    const tied = await inspect();
+    assert.match(tied.content[0].text, /a\.json/, "Equal mtimes use deterministic filename ordering.");
+    await writeFile(join(logs, "unrelated.xml"), '<test-run total="1" passed="0" failed="1"></test-run>'); await writeFile(join(logs, "unrelated.log"), "unrelated");
+    const explicit = await inspect({ normalizedResultPath: "Logs/a.json" });
+    assert.equal(explicit.details.artifacts.testResultsPath, undefined, "Explicit paths disable automatic XML selection.");
+    assert.equal(explicit.details.artifacts.logFilePath, undefined, "Explicit paths disable automatic log selection.");
+    await assert.rejects(() => inspect({ normalizedResultPath: "Logs/a.json", testResultsPath: "Logs/unrelated.xml" }), /no shared run identity|Conflicting/, "Explicit multi-path evidence remains strictly validated.");
+
+    await reset(); await writeFile(join(logs, "only.xml"), '<test-run total="1" passed="1" failed="0"></test-run>'); await writeFile(join(logs, "unrelated.log"), "context");
+    const xmlOnly = await inspect(); assert.equal(xmlOnly.details.testOutcome, "passed"); assert.equal(xmlOnly.details.artifacts.logFilePath, undefined, "XML-only fallback does not mix a log.");
+    await reset(); await writeFile(join(logs, "only.log"), "context");
+    const logOnly = await inspect(); assert.equal(logOnly.details.testOutcome, undefined, "Log-only context establishes no test outcome.");
+    await reset(); await assert.rejects(() => inspect(), /No valid Unity artifacts/); await assert.rejects(() => inspect({ latestFromLogs: false }), /No valid Unity artifacts/);
+
+    const outside = `${root}-outside.xml`;
+    await reset(); await writeFile(outside, '<test-run total="1" passed="1" failed="0"></test-run>'); await writeFile(join(logs, "primary.json"), valid("passed", { nunit: "Logs/escape.xml" }));
+    try {
+      await symlink(outside, join(logs, "escape.xml"), "file");
+      await assert.rejects(() => inspect(), /escapes the project root/, "Canonical symlink containment rejects escaping links.");
+    } catch (error: any) { assert(["EPERM", "EACCES"].includes(error?.code) || /escapes the project root/.test(String(error)), `Only unavailable symlink privileges may skip canonical containment: ${String(error)}`); }
+  } finally { await rm(root, { recursive: true, force: true }); await rm(`${root}-outside.xml`, { force: true }); }
 }
 console.log("pi-unity reverse load-order, result-contract and delayed-shutdown registration tests passed");
 
