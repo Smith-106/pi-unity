@@ -34,7 +34,7 @@ assert(packageJson.pi?.extensions?.includes("./index.ts"));
 assert(packageJson.pi?.skills?.includes("./skills"));
 assert(!packageJson.exports?.["./contracts/v1"], "The removed migration service must not retain a public contract export.");
 assert(!packageJson.scripts?.["migrate:unity-docs"], "The removed migration script must not retain an npm command.");
-for (const test of ["unity-core.test.ts", "unity-registration.test.ts", "unity-optional-integrations.test.ts", "unity-package-validation.test.ts"]) {
+for (const test of ["unity-core.test.ts", "unity-registration.test.ts", "unity-optional-integrations.test.ts", "release-registry-preflight.test.ts", "unity-package-validation.test.ts"]) {
   assert(packageJson.scripts?.test?.includes(test), `Expected npm test to run ${test}.`);
 }
 assert(!packageJson.scripts?.test?.includes("unity-docs-migration.test.ts"));
@@ -114,7 +114,10 @@ const releaseWorkflowText = readFileSync(new URL("../.github/workflows/release.y
 assert(releaseWorkflowText.includes("id-token: write"), "Trusted npm publishing requires GitHub OIDC permission.");
 assert(releaseWorkflowText.includes("npm@11.6.2") && releaseWorkflowText.includes("node-version: 22.19.0"), "Trusted publishing must use supported Node and npm versions.");
 assert(releaseWorkflowText.includes("npm publish --access public --provenance"), "The release workflow must publish the public scoped package with provenance.");
-assert(releaseWorkflowText.includes("existing_git_head") && releaseWorkflowText.includes("GITHUB_SHA"), "Release retries must reconcile npm gitHead with the exact workflow commit.");
+assert(releaseWorkflowText.includes("node .github/scripts/reconcile-npm-release.mjs"), "The release workflow must run its tested npm identity gate.");
+const releasePreflightText = readFileSync(new URL("../.github/scripts/reconcile-npm-release.mjs", import.meta.url), "utf8");
+assert(releasePreflightText.includes("metadata.version") && releasePreflightText.includes("metadata.gitHead") && releasePreflightText.includes("GITHUB_SHA"), "Release retries must reconcile structured npm version and gitHead metadata with the exact workflow commit.");
+assert(releasePreflightText.includes('includes("npm error code E404")'), "Only npm's explicit version-not-found response may permit publication.");
 assert(!releaseWorkflowText.includes("NODE_AUTH_TOKEN"), "OIDC publishing must not supply a long-lived npm token.");
 const npmIgnoreText = readFileSync(new URL("../.npmignore", import.meta.url), "utf8");
 assert(npmIgnoreText.includes(".gitattributes"), "Git attributes must not ship in the npm artifact.");
