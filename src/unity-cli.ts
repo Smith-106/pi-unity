@@ -46,6 +46,13 @@ export type UnityCliPipelineInstance = {
 
 export type UnityCliDiscoveryState = "not_attempted" | "available" | "absent" | "timeout" | "unavailable";
 
+export type UnityCliCommandParameter = {
+  name: string;
+  type: string;
+  required: boolean;
+  defaultValue?: unknown;
+};
+
 export type UnityCliProjectCapabilities = {
   cliAvailable: boolean;
   cliVersion?: string;
@@ -56,6 +63,10 @@ export type UnityCliProjectCapabilities = {
   advertisedCommands: string[];
   advertisedCommandCount: number;
   advertisedCommandsTruncated: boolean;
+  /** Full command descriptors are retained only for exact capability-gated routes. */
+  advertisedCommandParameters?: Record<string, readonly UnityCliCommandParameter[]>;
+  /** True only when the exact live Pipeline descriptor advertises raw argv support. */
+  pipelineSupportsExecArgv?: boolean;
   commandDiscoveryAttempted: boolean;
   commandDiscoverySucceeded: boolean;
   latestPipelineVersion?: string;
@@ -346,6 +357,7 @@ export function parseUnityCliPipelineListOutput(output: string, projectRoot: str
 type UnityCliCommandCatalog = {
   valid: boolean;
   commands: string[];
+  parametersByCommand: Record<string, readonly UnityCliCommandParameter[]>;
   total: number;
   truncated: boolean;
 };
@@ -366,19 +378,32 @@ function parseUnityCliCommandCatalog(output: string): UnityCliCommandCatalog {
       candidates.push(...value);
     }
   }
+  const parametersByCommand: Record<string, readonly UnityCliCommandParameter[]> = {};
   const names = candidates.flatMap((entry): string[] => {
+    const record = getRecord(entry);
     const rawName = typeof entry === "string"
       ? entry
-      : optionalString(getRecord(entry)?.name, getRecord(entry)?.command, getRecord(entry)?.id);
+      : optionalString(record?.name, record?.command, record?.id);
     if (!rawName) return [];
     const name = rawName.trim();
     if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name)) return [];
+    const rawParameters = Array.isArray(record?.parameters) ? record.parameters : [];
+    const parameters = rawParameters.slice(0, 32).flatMap((item): UnityCliCommandParameter[] => {
+      const parameter = getRecord(item);
+      const parameterName = optionalString(parameter?.name);
+      const type = optionalString(parameter?.type);
+      if (!parameterName || !type || parameterName.length > 120 || type.length > 120 || /[\u0000-\u001f\u007f]/.test(parameterName) || /[\u0000-\u001f\u007f]/.test(type)) return [];
+      return [{ name: parameterName, type, required: parameter?.required === true, ...(Object.prototype.hasOwnProperty.call(parameter ?? {}, "defaultValue") ? { defaultValue: parameter?.defaultValue } : {}) }];
+    });
+    if (!(name in parametersByCommand)) parametersByCommand[name] = parameters;
     return [name];
   });
   const unique = [...new Set(names)].sort((left, right) => left.localeCompare(right));
+  const commands = unique.slice(0, 256);
   return {
     valid: Boolean(payload?.success === true && valid),
-    commands: unique.slice(0, 256),
+    commands,
+    parametersByCommand: Object.fromEntries(commands.flatMap(name => parametersByCommand[name] ? [[name, parametersByCommand[name]]] : [])),
     total: unique.length,
     truncated: unique.length > 256 || names.length < candidates.length,
   };
@@ -426,6 +451,14 @@ export async function readDeclaredUnityPipelineVersion(projectRoot: string): Pro
   const manifest = await readJsonFile(join(projectRoot, "Packages", "manifest.json"));
   const manifestDependencies = getRecord(manifest?.dependencies);
   return optionalString(manifestDependencies?.["com.unity.pipeline"]);
+}
+
+/** Read only the public capability names; the descriptor's authentication token is never retained or surfaced. */
+async function readPipelineDescriptorCapabilities(projectRoot: string): Promise<string[] | undefined> {
+  const descriptor = await readJsonFile(join(projectRoot, "Library", "Pipeline", ".unity-pipeline-port"));
+  if (!descriptor) return undefined;
+  const values = Array.isArray(descriptor.capabilities) ? descriptor.capabilities : [];
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0 && value.length <= 120 && !/[\u0000-\u001f\u007f]/.test(value)))];
 }
 
 export function isUnityCliTimeout(result: Pick<UnityCliExecResult, "error">): boolean {
@@ -511,6 +544,8 @@ export async function inspectUnityCliProjectCapabilities(
   result.pipelineDiscovery = "available";
   const pipeline = parseUnityCliPipelineListOutput(pipelineResult.stdout, projectRoot);
   result.matchingInstances = pipeline.instances;
+  const descriptorCapabilities = await readPipelineDescriptorCapabilities(projectRoot);
+  result.pipelineSupportsExecArgv = descriptorCapabilities?.includes("exec.argv") === true;
   result.latestPipelineVersion = pipeline.latestVersion;
   if (pipeline.instances.length === 0) {
     result.pipelineDiscovery = "absent";
@@ -522,7 +557,9 @@ export async function inspectUnityCliProjectCapabilities(
   }
 
   result.commandDiscoveryAttempted = true;
-  const listResult = await execute(command, ["--format", "json", "--no-banner", "--non-interactive", "list", "--project-path", projectRoot], { timeout: discoveryTimeout, signal: options.signal });
+  // `unity list` normalizes parameter types/defaults, while `unity command` with no command
+  // returns the live Pipeline catalog descriptor needed for exact capability-gated forwarding.
+  const listResult = await execute(command, ["--format", "json", "--no-banner", "--non-interactive", "command", "--project-path", projectRoot, "--detail", "full"], { timeout: discoveryTimeout, signal: options.signal });
   const catalog = parseUnityCliCommandCatalog(listResult.stdout);
   const listPayload = parseJsonObject(listResult.stdout);
   const commandDiagnostics = cliEnvelopeDiagnostics(listPayload);
@@ -533,12 +570,14 @@ export async function inspectUnityCliProjectCapabilities(
     // Commands in a warning-bearing catalog are informational only, not advertised
     // capability evidence. Keep descriptors for status visibility without enabling dispatch.
     result.advertisedCommands = catalog.commands;
+    result.advertisedCommandParameters = catalog.parametersByCommand;
     result.advertisedCommandCount = catalog.total;
     result.advertisedCommandsTruncated = catalog.truncated;
     return result;
   }
   result.commandDiscovery = "available";
   result.advertisedCommands = catalog.commands;
+  result.advertisedCommandParameters = catalog.parametersByCommand;
   result.advertisedCommandCount = catalog.total;
   result.advertisedCommandsTruncated = catalog.truncated;
   result.commandDiscoverySucceeded = true;
@@ -569,6 +608,8 @@ export type UnityPlanningInspectionRequest = {
   args?: string[];
   /** A bounded C# snippet for advertised eval. Pipeline compiles it with Roslyn on the Editor main thread. */
   evalSnippet?: string;
+  /** Verified Pipeline eval dispatcher wait in milliseconds; distinct from the CLI/host wait. */
+  handlerTimeoutMilliseconds?: number;
 };
 
 export type UnityPlanningInspectionResult =
@@ -622,6 +663,20 @@ function runScriptCommandFailure(output: string): "malformed" | "failure" | unde
     return String(caseInsensitiveField(diagnostic ?? {}, "severity") ?? "").toLowerCase() === "error";
   })) return "failure";
   return undefined;
+}
+
+function hasVerifiedEvalTimeoutContract(capabilities: UnityCliProjectCapabilities): boolean {
+  const parameters = capabilities.advertisedCommandParameters?.eval;
+  return capabilities.pipelineSupportsExecArgv === true
+    && Array.isArray(parameters)
+    && parameters.length === 2
+    && parameters[0]?.name === "code"
+    && parameters[0]?.type === "String"
+    && parameters[0]?.required === true
+    && parameters[1]?.name === "timeout"
+    && parameters[1]?.type === "Int32"
+    && parameters[1]?.required === false
+    && parameters[1]?.defaultValue === 5000;
 }
 
 function connectedCommandFailure(output: string, isEval: boolean): "malformed" | "failure" | undefined {
@@ -691,6 +746,12 @@ export async function dispatchUnityPlanningInspection(
     if (request.args?.length || !snippet || snippet.length > UNITY_PIPELINE_EVAL_MAX_CHARS || /[\u0000]/.test(snippet)) {
       return { outcome: "rejected", code: "planning_eval_invalid", message: "Eval requires one non-empty bounded C# snippet and no separate arguments." };
     }
+    if (request.handlerTimeoutMilliseconds !== undefined && (!Number.isInteger(request.handlerTimeoutMilliseconds) || request.handlerTimeoutMilliseconds < 1 || request.handlerTimeoutMilliseconds > 86_400_000)) {
+      return { outcome: "rejected", code: "planning_eval_invalid", message: "Eval handler timeout must be an integer from 1 to 86400000 milliseconds." };
+    }
+    if (request.handlerTimeoutMilliseconds !== undefined && !hasVerifiedEvalTimeoutContract(initial)) {
+      return { outcome: "rejected", code: "planning_eval_timeout_unavailable", message: "The exact Pipeline copy does not establish raw argv support and the documented eval timeout signature; eval was not dispatched." };
+    }
   } else if (!UNITY_PLANNING_READ_COMMANDS.includes(request.command as typeof UNITY_PLANNING_READ_COMMANDS[number]) || (request.evalSnippet?.trim() ?? "") !== "") {
     return { outcome: "rejected", code: "planning_command_invalid", message: "Only a package-owned purpose-built inspection command may be selected here." };
   }
@@ -706,13 +767,16 @@ export async function dispatchUnityPlanningInspection(
   if (!refreshed.advertisedCommands.includes(request.command)) {
     return { outcome: "rejected", code: "planning_command_unadvertised", message: "The refreshed exact Pipeline copy did not advertise the requested command." };
   }
+  if (isEval && request.handlerTimeoutMilliseconds !== undefined && !hasVerifiedEvalTimeoutContract(refreshed)) {
+    return { outcome: "rejected", code: "planning_eval_timeout_unavailable", message: "The exact Pipeline eval timeout capability changed before dispatch; eval was not dispatched." };
+  }
 
   const command = resolveUnityCliCommand({ cliCommand: options.cliCommand });
   const args = [
     "--format", "json", "--no-banner", "--non-interactive", "command", "--project-path", projectRoot,
     "--timeout", String(Math.max(1, Math.ceil((options.timeout ?? UNITY_CLI_DISCOVERY_TIMEOUT_MS) / 1000))),
     request.command,
-    ...(isEval ? [request.evalSnippet!.trim()] : request.args ?? []),
+    ...(isEval ? [request.evalSnippet!.trim(), ...(request.handlerTimeoutMilliseconds === undefined ? [] : [String(request.handlerTimeoutMilliseconds)])] : request.args ?? []),
   ];
   const execution = await options.execute(command, args, { timeout: options.timeout ?? UNITY_CLI_DISCOVERY_TIMEOUT_MS, signal: options.signal });
   const raw = [execution.stdout, execution.stderr].filter(Boolean).join("\n");

@@ -34,7 +34,7 @@ Use these tools with an already-open exact Unity project copy that has a reachab
 - `unity_project_status` — inspect lockfiles, matching Unity processes, Pipeline reachability, package version, and advertised commands without launching Unity.
 - `unity_pipeline_recompile` — recompile through Pipeline with exact-copy preflight, bounded polling, and compact compiler evidence.
 - `unity_run_tests` — one intent-oriented EditMode or PlayMode workflow. It reuses compatible connected Pipeline execution or selects isolated `unity test` when the exact project copy is closed.
-- `unity_pipeline_eval` — execute bounded project-specific C# through Pipeline's Roslyn REPL. `timeoutSeconds` bounds pi-unity and Unity CLI waits (1–86,400 seconds); it does not alone prove a handler or main-thread scheduler deadline changed. A timeout is uncertain and does not cancel or retry Editor work.
+- `unity_pipeline_eval` — execute bounded project-specific C# through Pipeline's Roslyn REPL. `timeoutSeconds` bounds pi-unity and Unity CLI waits (1–86,400 seconds). Optional `handlerTimeoutMilliseconds` is forwarded only when the exact reachable Pipeline advertises raw argv plus the verified eval timeout signature; it bounds that Pipeline dispatcher wait, not code already running on Unity's main thread. A timeout is uncertain and does not cancel or retry Editor work.
 - `unity_pipeline_inspect` — dispatch supported package-owned inspection commands (including read-only `get_runtime_pipeline_settings`) and return structured evidence. Runtime settings are refused by Pipeline in Play Mode; pi-unity never exits Play Mode to read them.
 - `unity_pipeline_run_script` — compile one existing project `.cs` file in Pipeline's ephemeral in-memory mode and invoke a named static entry point; supports bounded JSON arguments and compile-only `dryRun`. It deliberately does not expose hotpatch.
 
@@ -112,6 +112,8 @@ Another connected client is not a project lock. When Pipeline returns stable cor
 { code: "return UnityEditor.EditorSettings.scriptChangesDuringPlay;" }
 { code: "var s = UnityEngine.Application.dataPath; return s.Length;" }
 ```
+
+`timeoutSeconds` remains the host/CLI wait. On exact copies that advertise raw argv and the verified eval `code`/integer-`timeout` signature, `handlerTimeoutMilliseconds` (1–86,400,000) also sets Pipeline's dispatcher wait through its positional command argument. A shorter host timeout may still win. This server wait can prevent queued work from starting, but cannot cancel eval code that already began on Unity's main thread; treat expiry as uncertain and never retry or fall back.
 
 Use `unity_pipeline_inspect` when a purpose-built structured command fits. Use eval for bounded project-specific work that matches the user's intent. Prefer typed tools when they provide stronger lifecycle, polling, validation, or recovery semantics.
 

@@ -109,6 +109,10 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
   assert(evalTool, "pi-unity must register Pipeline eval as the primary C# REPL tool");
   assert.equal(evalTool.parameters.additionalProperties, false);
   assert.equal(evalTool.parameters.properties.code.maxLength, 4000);
+  assert.equal(evalTool.parameters.properties.handlerTimeoutMilliseconds.minimum, 1);
+  assert.equal(evalTool.parameters.properties.handlerTimeoutMilliseconds.maximum, 86400000);
+  assert.match(evalTool.parameters.properties.handlerTimeoutMilliseconds.description, /raw argv/i);
+  assert.match(evalTool.promptGuidelines.join(" "), /shorter host deadline may still win/i);
   const inspectionTool = unity.tools.find((tool) => tool.name === "unity_pipeline_inspect");
   assert(inspectionTool, "pi-unity must register the purpose-built Pipeline inspection tool");
   assert.equal(inspectionTool.parameters.additionalProperties, false);
@@ -215,7 +219,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
       calls.push(args);
       if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonicalProject, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-      if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["get_authoring_root", "eval"] } }), stderr: "" };
+      if (args.includes("command") && !args.includes("get_authoring_root") && !args.includes("eval")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["get_authoring_root", "eval"] } }), stderr: "" };
       const connectedCommand = args[args.indexOf("--timeout") + 2];
       return connectedCommand === "eval"
         ? { code: 0, stdout: JSON.stringify({ success: true, data: { result: { success: true, result: 42, diagnostics: [] } } }), stderr: "" }
@@ -254,7 +258,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const pi = fakePi(async (_command, args) => {
       if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonicalProject, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-      if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "editor_stop", "recompile", "recompile_status", "run_tests", "test_status"] } }), stderr: "" };
+      if (args.includes("command") && !args.includes("--timeout")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "editor_stop", "recompile", "recompile_status", "run_tests", "test_status"] } }), stderr: "" };
       const command = args[args.indexOf("--timeout") + 2];
       dispatched.push(command);
       if (command === "editor_status") return { code: 0, stdout: JSON.stringify({ success: true, data: { result: { status: "ready", playMode: playMode ? "playing" : "stopped" } } }), stderr: "" };
@@ -328,7 +332,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
         if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
         const response = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
         if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-        if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+        if (args.includes("command") && !args.includes("--timeout")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
         commands.push(args);
         const command = args[args.indexOf("--timeout") + 2];
         if (command === "editor_status") return response({ status: "ready", playMode: "stopped" });
@@ -415,7 +419,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
             discoveries++;
             return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: project, pid: scenario === "identity" && discoveries > 1 ? 43 : 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
           }
-          if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: scenario === "unadvertised" ? ["editor_status"] : [command] } }), stderr: "" };
+          if (args.includes("command") && !args.includes("--timeout")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: scenario === "unadvertised" ? ["editor_status"] : [command] } }), stderr: "" };
           assert.equal(args[args.indexOf("--timeout") + 2], command, "Only the selected command may dispatch.");
           if (scenario === "dispatch-failed") return { code: 1, stdout: "", stderr: "Synthetic dispatch error" };
           if (scenario === "timeout") return { code: null, killed: true, stdout: "", stderr: "" };
@@ -434,7 +438,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
         if (expectedCode) assert.equal(detail.code, expectedCode, `${name}/${scenario} structured reason`);
         if (["timeout", "thrown-timeout", "dispatch-failed"].includes(scenario)) assert.match(detail.message, /effect may be uncertain/, "Failure after dispatch never implies no mutation occurred.");
         if (scenario === "reported-failure") assert.match(detail.message, /Synthetic diagnostic/);
-        const dispatches = calls.filter(args => args.includes("command") && !args.includes("list"));
+        const dispatches = calls.filter(args => args.includes("command") && args.includes("--timeout"));
         assert.equal(dispatches.length, ["identity", "unadvertised"].includes(scenario) ? 0 : 1, `${name}/${scenario}: zero retry or fallback`);
         assert(calls.every(args => !args.some(arg => ["open", "run", "test", "Exit", "editor_stop"].includes(arg))), "No lifecycle, launch, test or fallback commands.");
       }
@@ -627,7 +631,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
         calls.push(args);
         if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
         if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-        if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+        if (args.includes("command") && !args.includes("--timeout")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
         const command = args[args.indexOf("--timeout") + 2];
         const envelope = (result: any) => ({ code: 0, stdout: JSON.stringify({ success: true, data: { result } }), stderr: "" });
         if (command === "editor_status") return envelope({ status: "idle" });
@@ -701,7 +705,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const preflightPi = fakePi(async (_command, args) => {
       if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonical, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-      if (args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
+      if (args.includes("command") && !args.includes("--timeout")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["editor_status", "run_tests", "test_status"] } }), stderr: "" };
       const command = args[args.indexOf("--timeout") + 2];
       return { code: 0, stdout: JSON.stringify({ success: true, data: { result: command === "editor_status" ? { status: "idle" } : { status: "running" } } }), stderr: "" };
     });

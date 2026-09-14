@@ -168,7 +168,8 @@ const PIPELINE_TEST_PARAMS = Type.Object({
 const PIPELINE_EVAL_PARAMS = Type.Object({
   path: Type.Optional(Type.String({ maxLength: 1000, description: "Unity project path, workspace copy root, or folder containing project copies." })),
   code: Type.String({ minLength: 1, maxLength: 4000, description: "Bounded C# source for advertised Pipeline eval. Roslyn compiles it on the connected Editor main thread; include an explicit return value when evidence is needed." }),
-  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400, default: 12, description: "Connected eval deadline in seconds (maximum 24 hours). A timeout is uncertain and does not retry or cancel Unity work." })),
+  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400, default: 12, description: "Connected eval host/CLI deadline in seconds (maximum 24 hours). A timeout is uncertain and does not retry or cancel Unity work." })),
+  handlerTimeoutMilliseconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400000, description: "Optional advertised Pipeline eval dispatcher wait in milliseconds. Forwarded only when the exact copy advertises raw argv and the verified code/timeout signature; it cannot cancel code already started on Unity's main thread." })),
 }, { additionalProperties: false });
 
 const PIPELINE_RUN_SCRIPT_PARAMS = Type.Object({
@@ -1712,13 +1713,13 @@ export default function freeUnityPi(pi: ExtensionAPI) {
   pi.registerTool({
     name: "unity_pipeline_eval",
     label: "Unity Pipeline Eval",
-    description: "Execute one bounded C# snippet through advertised eval in an already-open exact Unity Pipeline Editor. timeoutSeconds bounds pi-unity and Unity CLI waits; handler/server deadline effects remain diagnostic unless verified by the installed Pipeline contract.",
+    description: "Execute one bounded C# snippet through advertised eval in an already-open exact Unity Pipeline Editor. timeoutSeconds bounds pi-unity and Unity CLI waits; optional handlerTimeoutMilliseconds is forwarded only through a verified Pipeline raw-argv timeout contract and cannot cancel code already started on Unity's main thread.",
     promptSnippet: "Query or operate on an already-open exact Unity project through Pipeline's Roslyn C# REPL.",
     promptGuidelines: [
       "Use unity_pipeline_eval for project-specific properties, APIs, and operations that advertised typed commands do not cover. It revalidates exact-copy identity and advertised eval immediately before dispatch.",
       "Pipeline eval compiles arbitrary C# with Roslyn on the Editor main thread. Include an explicit return value for observable evidence; normal property reads and local-variable snippets are supported.",
       "Eval is not statically read-only. Follow user intent and project guidance, and obtain explicit authorization before lifecycle, persistent-setting, destructive, asset, scene-save, package, build, or test mutations.",
-      "timeoutSeconds bounds the host and Unity CLI wait. It does not by itself prove the eval handler or main-thread scheduler deadline changed; classify a timeout layer only from verified diagnostics.",
+      "timeoutSeconds bounds the host and Unity CLI wait. When supplied, handlerTimeoutMilliseconds bounds only the verified Pipeline dispatcher wait; a shorter host deadline may still win, and a server wait expiry cannot cancel code already started on Unity's main thread.",
       "A rejected, malformed, failing, or timed-out eval is not success; do not silently retry it through another route.",
     ],
     parameters: PIPELINE_EVAL_PARAMS,
@@ -1731,6 +1732,7 @@ export default function freeUnityPi(pi: ExtensionAPI) {
         unityVersion: await requireManualUnityVersion(candidate),
         command: "eval",
         evalSnippet: params.code,
+        handlerTimeoutMilliseconds: params.handlerTimeoutMilliseconds,
       }, {
         execute: createPlanningUnityCliExecutor(pi),
         signal,

@@ -209,6 +209,24 @@ const malformedCapabilities = await inspectUnityCliProjectCapabilities("/fixture
 });
 assert.equal(malformedCapabilities.pipelineDiscovery, "unavailable");
 
+const catalogProject = await mkdtemp(join(tmpdir(), "pi-unity-cli-catalog-"));
+try {
+  const catalogCapabilities = await inspectUnityCliProjectCapabilities(catalogProject, "6000.1.0f1", {
+    execute: async (_command, args) => {
+      if (args.includes("--version")) return { stdout: "1.0.0", stderr: "" };
+      if (args.includes("pipeline")) return { stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: catalogProject, pid: 7, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+      assert(args.includes("command") && args.includes("--detail") && args.includes("full"), "Exact timeout gating must request the full command descriptor, not normalized unity list metadata.");
+      return { stdout: JSON.stringify({ success: true, data: { commands: [{ name: "eval", parameters: [{ name: "code", type: "String", required: true, defaultValue: null }, { name: "timeout", type: "Int32", required: false, defaultValue: 5000 }] }] } }), stderr: "" };
+    },
+  });
+  assert.deepEqual(catalogCapabilities.advertisedCommandParameters?.eval, [
+    { name: "code", type: "String", required: true, defaultValue: null },
+    { name: "timeout", type: "Int32", required: false, defaultValue: 5000 },
+  ], "Full command descriptor preserves the eval signature used by the forwarding gate.");
+} finally {
+  await rm(catalogProject, { recursive: true, force: true });
+}
+
 assert.deepEqual(UNITY_PLANNING_READ_COMMANDS, [
   "get_authoring_root",
   "get_build_settings",
@@ -253,6 +271,64 @@ try {
     assert(dispatched.at(-1)?.includes("--format") && dispatched.at(-1)?.includes("json"), "Connected inspection requests structured JSON evidence.");
   }
   assert.equal(dispatched.length, 2, "Eval is dispatched only through the exact-copy guarded path.");
+  const defaultEvalArgs = dispatched.at(-1)!;
+  assert.equal(defaultEvalArgs.at(-1), "var s = UnityEngine.Application.dataPath; return s.Length;", "Omitted handler timeout preserves the existing eval argv exactly.");
+
+  const evalTimeoutCapabilities = (): UnityCliProjectCapabilities => ({
+    ...planningCapabilities(42),
+    pipelineSupportsExecArgv: true,
+    advertisedCommandParameters: {
+      eval: [
+        { name: "code", type: "String", required: true },
+        { name: "timeout", type: "Int32", required: false, defaultValue: 5000 },
+      ],
+    },
+  });
+  const handlerTimeoutCalls: string[][] = [];
+  const handlerTimeout = await dispatchUnityPlanningInspection({
+    projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval",
+    evalSnippet: "return \"--not-a-flag\";", handlerTimeoutMilliseconds: 321,
+  }, {
+    inspect: async () => evalTimeoutCapabilities(),
+    execute: async (_command, args) => {
+      handlerTimeoutCalls.push(args);
+      return { stdout: JSON.stringify({ success: true, data: { result: { success: true, result: "safe", diagnostics: [] } } }), stderr: "" };
+    },
+  });
+  assert.equal(handlerTimeout.outcome, "dispatched");
+  assert.equal(handlerTimeoutCalls.length, 1, "Handler timeout forwarding must dispatch exactly once.");
+  const handlerTimeoutArgs = handlerTimeoutCalls[0]!;
+  const evalIndex = handlerTimeoutArgs.indexOf("eval");
+  assert.deepEqual(handlerTimeoutArgs.slice(evalIndex), ["eval", "return \"--not-a-flag\";", "321"], "The handler timeout is an argv positional after code, preserving whitespace/flag-like C# exactly.");
+  assert.equal(handlerTimeoutArgs.filter(arg => arg === "--timeout").length, 1, "Do not send a colliding duplicate --timeout flag.");
+  assert.equal(handlerTimeoutArgs[handlerTimeoutArgs.indexOf("--timeout") + 1], "12", "Existing host/CLI timeout remains seconds and precedes eval.");
+
+  for (const unavailableCapabilities of [
+    { ...evalTimeoutCapabilities(), pipelineSupportsExecArgv: false },
+    { ...evalTimeoutCapabilities(), advertisedCommandParameters: { eval: [{ name: "code", type: "String", required: true }] } },
+  ]) {
+    const unavailable = await dispatchUnityPlanningInspection({
+      projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321,
+    }, { inspect: async () => unavailableCapabilities, execute: async () => { throw new Error("missing timeout contract must not dispatch"); } });
+    assert.equal(unavailable.outcome, "rejected");
+    if (unavailable.outcome === "rejected") assert.equal(unavailable.code, "planning_eval_timeout_unavailable");
+  }
+  let handlerTimeoutAttempts = 0;
+  const uncertainHandlerTimeout = await dispatchUnityPlanningInspection({
+    projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321,
+  }, {
+    inspect: async () => evalTimeoutCapabilities(),
+    execute: async () => {
+      handlerTimeoutAttempts++;
+      return { stdout: "", stderr: "server wait expired", error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+    },
+  });
+  assert.equal(handlerTimeoutAttempts, 1, "A server wait expiry must not replay eval or route-fallback.");
+  assert.equal(uncertainHandlerTimeout.outcome, "rejected");
+  if (uncertainHandlerTimeout.outcome === "rejected") {
+    assert.equal(uncertainHandlerTimeout.code, "planning_command_timeout");
+    assert.match(uncertainHandlerTimeout.message, /effect may be uncertain/i);
+  }
 
   const intentGoverned = await dispatchUnityPlanningInspection({
     projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval",
