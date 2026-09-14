@@ -680,7 +680,9 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     });
     registerUnity(preflightPi as any);
     const preflightTool = preflightPi.tools.find(item => item.name === "unity_run_tests");
+    const beforePreflight = await readdir(join(project, "Logs"));
     await assert.rejects(() => preflightTool.execute("preflight", { path: project, testPlatform: "EditMode", execution: "connected" }, undefined, undefined, ctx), /pre-existing/);
+    assert.deepEqual(await readdir(join(project, "Logs")), beforePreflight, "Pre-dispatch rejection writes no current-run artifact.");
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 // U2 acceptance uses the public inspection tool so selection and link failures cannot be
