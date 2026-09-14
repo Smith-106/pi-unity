@@ -7,6 +7,8 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+## 0.14.0 - 2026-09-14
+
 ### Fixed
 
 - Preserve durable normalized connected-test evidence for terminal failed, cancelled, runner-error, and incomplete Pipeline results without replaying dispatch, overriding active Pipeline state from partial records, or misreporting inconsistent counts/records as passing.
