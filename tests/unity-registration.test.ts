@@ -214,12 +214,18 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     await mkdir(join(project, "Packages"), { recursive: true });
     await writeFile(join(project, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.1.0f1\n");
     await writeFile(join(project, "Packages", "manifest.json"), "{\"dependencies\":{}}\n");
+    await mkdir(join(project, "Library", "Pipeline"), { recursive: true });
+    await writeFile(join(project, "Library", "Pipeline", ".unity-pipeline-port"), JSON.stringify({ capabilities: ["exec.argv"] }));
     const canonicalProject = await realpath(project);
+    let malformedEvalDescriptor = false;
     const pi = fakePi(async (_command, args) => {
       calls.push(args);
       if (args.includes("--version")) return { code: 0, stdout: "1.0.0", stderr: "" };
       if (args.includes("pipeline") && args.includes("list")) return { code: 0, stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: canonicalProject, pid: 42, pipelineServer: { isReachable: true } }] } }), stderr: "" };
-      if (args.includes("command") && !args.includes("get_authoring_root") && !args.includes("eval")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: ["get_authoring_root", "eval"] } }), stderr: "" };
+      if (args.includes("command") && !args.includes("get_authoring_root") && !args.includes("eval")) return { code: 0, stdout: JSON.stringify({ success: true, data: { commands: [
+        { name: "get_authoring_root", parameters: [] },
+        { name: "eval", parameters: malformedEvalDescriptor ? [{ name: "code", type: "String", required: true }, null] : [{ name: "code", type: "String", required: true }, { name: "timeout", type: "Int32", required: false, defaultValue: 5000 }] },
+      ] } }), stderr: "" };
       const connectedCommand = args[args.indexOf("--timeout") + 2];
       return connectedCommand === "eval"
         ? { code: 0, stdout: JSON.stringify({ success: true, data: { result: { success: true, result: 42, diagnostics: [] } } }), stderr: "" }
@@ -235,6 +241,19 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     assert.match(result.content[0].text, /token= \[redacted\]/);
     const evalResult = await pipelineEval.execute("eval", { path: project, code: "var s = UnityEngine.Application.dataPath; return s.Length;", timeoutSeconds: 86400 }, undefined, undefined, ctx);
     assert.equal(evalResult.details.pipelineEval.outcome, "dispatched", "The primary Pipeline eval tool must expose advertised arbitrary C# eval.");
+    const handlerEvalCode = "return \"--not-a-flag\";";
+    const handlerEvalResult = await pipelineEval.execute("handler-eval", { path: project, code: handlerEvalCode, timeoutSeconds: 12, handlerTimeoutMilliseconds: 321 }, undefined, undefined, ctx);
+    assert.equal(handlerEvalResult.details.pipelineEval.outcome, "dispatched", "The registered native eval tool forwards a legitimately advertised handler timeout.");
+    const handlerEvalCall = calls.find((args) => args.includes(handlerEvalCode));
+    const handlerEvalIndex = handlerEvalCall!.indexOf("eval");
+    assert.deepEqual(handlerEvalCall!.slice(handlerEvalIndex), ["eval", handlerEvalCode, "321"], "Registered eval preserves code as one argv token and appends milliseconds only after it.");
+    assert.equal(handlerEvalCall!.filter(arg => arg === "--timeout").length, 1, "Registered eval keeps exactly one host timeout flag.");
+    malformedEvalDescriptor = true;
+    const evalDispatchCount = calls.filter(args => args.includes("eval") && args.includes("--timeout")).length;
+    const malformedEvalResult = await pipelineEval.execute("malformed-handler-eval", { path: project, code: "return false;", handlerTimeoutMilliseconds: 321 }, undefined, undefined, ctx);
+    assert.equal(malformedEvalResult.details.pipelineEval.outcome, "rejected", "The registered tool rejects malformed live descriptors before eval dispatch.");
+    assert.equal(malformedEvalResult.details.pipelineEval.code, "planning_eval_timeout_unavailable");
+    assert.equal(calls.filter(args => args.includes("eval") && args.includes("--timeout")).length, evalDispatchCount, "Malformed descriptor rejection has zero native eval dispatches.");
     const evalCall = calls.find((args) => args.includes("var s = UnityEngine.Application.dataPath; return s.Length;"));
     assert.equal(evalCall?.[evalCall.indexOf("--timeout") + 1], "86400", "Eval forwards its selected deadline to Unity CLI.");
     assert(calls.some((args) => args.includes("get_authoring_root")), "The guarded handler must dispatch only after discovery.");

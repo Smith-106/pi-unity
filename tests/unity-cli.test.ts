@@ -219,10 +219,39 @@ try {
       return { stdout: JSON.stringify({ success: true, data: { commands: [{ name: "eval", parameters: [{ name: "code", type: "String", required: true, defaultValue: null }, { name: "timeout", type: "Int32", required: false, defaultValue: 5000 }] }] } }), stderr: "" };
     },
   });
-  assert.deepEqual(catalogCapabilities.advertisedCommandParameters?.eval, [
+  assert.deepEqual(catalogCapabilities.verifiedCommandParameters?.eval, [
     { name: "code", type: "String", required: true, defaultValue: null },
     { name: "timeout", type: "Int32", required: false, defaultValue: 5000 },
-  ], "Full command descriptor preserves the eval signature used by the forwarding gate.");
+  ], "Only a complete full command descriptor is retained as capability evidence.");
+
+  await mkdir(join(catalogProject, "Library", "Pipeline"), { recursive: true });
+  await writeFile(join(catalogProject, "Library", "Pipeline", ".unity-pipeline-port"), JSON.stringify({ capabilities: ["exec.argv"] }));
+  const validEvalDescriptor = { name: "eval", parameters: [{ name: "code", type: "String", required: true }, { name: "timeout", type: "Int32", required: false, defaultValue: 5000 }] };
+  const malformedCatalogs: Array<[string, unknown[]]> = [
+    ["null parameter", [{ ...validEvalDescriptor, parameters: [validEvalDescriptor.parameters[0], null] }]],
+    ["nonboolean required", [{ ...validEvalDescriptor, parameters: [validEvalDescriptor.parameters[0], { name: "timeout", type: "Int32", required: "false", defaultValue: 5000 }] }]],
+    ["missing required", [{ ...validEvalDescriptor, parameters: [{ name: "code", type: "String" }, validEvalDescriptor.parameters[1]] }]],
+    ["excess parameters", [{ ...validEvalDescriptor, parameters: Array.from({ length: 33 }, () => ({ name: "code", type: "String", required: true })) }]],
+    ["duplicate eval", [validEvalDescriptor, validEvalDescriptor]],
+    ["conflicting eval", [validEvalDescriptor, { ...validEvalDescriptor, parameters: [validEvalDescriptor.parameters[0]] }]],
+  ];
+  for (const [label, commands] of malformedCatalogs) {
+    const inspect = () => inspectUnityCliProjectCapabilities(catalogProject, "6000.1.0f1", {
+      execute: async (_command, args) => {
+        if (args.includes("--version")) return { stdout: "1.0.0", stderr: "" };
+        if (args.includes("pipeline")) return { stdout: JSON.stringify({ success: true, data: { instances: [{ projectPath: catalogProject, pid: 7, pipelineServer: { isReachable: true } }] } }), stderr: "" };
+        return { stdout: JSON.stringify({ success: true, data: { commands } }), stderr: "" };
+      },
+    });
+    let evalDispatches = 0;
+    const rejected = await dispatchUnityPlanningInspection({ projectRoot: catalogProject, unityVersion: "6000.1.0f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321 }, {
+      inspect,
+      execute: async () => { evalDispatches++; return { stdout: "", stderr: "" }; },
+    });
+    assert.equal(rejected.outcome, "rejected", `${label} must not authorize handler-timeout forwarding.`);
+    if (rejected.outcome === "rejected") assert.equal(rejected.code, "planning_eval_timeout_unavailable");
+    assert.equal(evalDispatches, 0, `${label} must reject before eval dispatch.`);
+  }
 } finally {
   await rm(catalogProject, { recursive: true, force: true });
 }
@@ -277,7 +306,7 @@ try {
   const evalTimeoutCapabilities = (): UnityCliProjectCapabilities => ({
     ...planningCapabilities(42),
     pipelineSupportsExecArgv: true,
-    advertisedCommandParameters: {
+    verifiedCommandParameters: {
       eval: [
         { name: "code", type: "String", required: true },
         { name: "timeout", type: "Int32", required: false, defaultValue: 5000 },
@@ -305,7 +334,7 @@ try {
 
   for (const unavailableCapabilities of [
     { ...evalTimeoutCapabilities(), pipelineSupportsExecArgv: false },
-    { ...evalTimeoutCapabilities(), advertisedCommandParameters: { eval: [{ name: "code", type: "String", required: true }] } },
+    { ...evalTimeoutCapabilities(), verifiedCommandParameters: { eval: [{ name: "code", type: "String", required: true }] } },
   ]) {
     const unavailable = await dispatchUnityPlanningInspection({
       projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321,
@@ -328,6 +357,35 @@ try {
   if (uncertainHandlerTimeout.outcome === "rejected") {
     assert.equal(uncertainHandlerTimeout.code, "planning_command_timeout");
     assert.match(uncertainHandlerTimeout.message, /effect may be uncertain/i);
+  }
+  let serverTimeoutAttempts = 0;
+  const serverTimeout = await dispatchUnityPlanningInspection({
+    projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321,
+  }, {
+    inspect: async () => evalTimeoutCapabilities(),
+    execute: async () => {
+      serverTimeoutAttempts++;
+      return { stdout: JSON.stringify({ success: false, error: { message: "eval timed out after 321ms" }, data: {} }), stderr: "" };
+    },
+  });
+  assert.equal(serverTimeoutAttempts, 1, "A server timeout envelope must not replay eval or route-fallback.");
+  assert.equal(serverTimeout.outcome, "rejected");
+  if (serverTimeout.outcome === "rejected") assert.equal(serverTimeout.code, "planning_command_reported_failure");
+
+  for (const [label, refreshed] of [
+    ["signature loss", { ...evalTimeoutCapabilities(), verifiedCommandParameters: { eval: [{ name: "code", type: "String", required: true }] } }],
+    ["exec.argv loss", { ...evalTimeoutCapabilities(), pipelineSupportsExecArgv: false }],
+  ] as const) {
+    let inspections = 0; let evalDispatches = 0;
+    const refreshedRejected = await dispatchUnityPlanningInspection({
+      projectRoot: planningProject, unityVersion: "6000.1.13f1", command: "eval", evalSnippet: "return true;", handlerTimeoutMilliseconds: 321,
+    }, {
+      inspect: async () => ++inspections === 1 ? evalTimeoutCapabilities() : refreshed,
+      execute: async () => { evalDispatches++; return { stdout: "", stderr: "" }; },
+    });
+    assert.equal(refreshedRejected.outcome, "rejected", `${label} must block dispatch after initial approval.`);
+    if (refreshedRejected.outcome === "rejected") assert.equal(refreshedRejected.code, "planning_eval_timeout_unavailable");
+    assert.equal(evalDispatches, 0, `${label} must have zero eval dispatches.`);
   }
 
   const intentGoverned = await dispatchUnityPlanningInspection({

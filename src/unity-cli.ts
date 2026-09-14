@@ -63,8 +63,10 @@ export type UnityCliProjectCapabilities = {
   advertisedCommands: string[];
   advertisedCommandCount: number;
   advertisedCommandsTruncated: boolean;
-  /** Full command descriptors are retained only for exact capability-gated routes. */
+  /** Display-oriented command descriptors. They are never capability evidence. */
   advertisedCommandParameters?: Record<string, readonly UnityCliCommandParameter[]>;
+  /** Complete, bounded, unambiguous descriptors eligible for exact capability gates. */
+  verifiedCommandParameters?: Record<string, readonly UnityCliCommandParameter[]>;
   /** True only when the exact live Pipeline descriptor advertises raw argv support. */
   pipelineSupportsExecArgv?: boolean;
   commandDiscoveryAttempted: boolean;
@@ -358,9 +360,14 @@ type UnityCliCommandCatalog = {
   valid: boolean;
   commands: string[];
   parametersByCommand: Record<string, readonly UnityCliCommandParameter[]>;
+  verifiedParametersByCommand: Record<string, readonly UnityCliCommandParameter[]>;
   total: number;
   truncated: boolean;
 };
+
+function isBoundedDescriptorString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 120 && !/[\u0000-\u001f\u007f]/.test(value);
+}
 
 function parseUnityCliCommandCatalog(output: string): UnityCliCommandCatalog {
   const payload = parseJsonObject(output);
@@ -378,34 +385,53 @@ function parseUnityCliCommandCatalog(output: string): UnityCliCommandCatalog {
       candidates.push(...value);
     }
   }
+
   const parametersByCommand: Record<string, readonly UnityCliCommandParameter[]> = {};
-  const names = candidates.flatMap((entry): string[] => {
+  const verifiedCandidates = new Map<string, Array<readonly UnityCliCommandParameter[] | undefined>>();
+  const names: string[] = [];
+  for (const entry of candidates) {
     const record = getRecord(entry);
-    const rawName = typeof entry === "string"
-      ? entry
-      : optionalString(record?.name, record?.command, record?.id);
-    if (!rawName) return [];
+    const rawName = typeof entry === "string" ? entry : optionalString(record?.name, record?.command, record?.id);
+    if (!isBoundedDescriptorString(rawName)) continue;
     const name = rawName.trim();
-    if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name)) return [];
-    const rawParameters = Array.isArray(record?.parameters) ? record.parameters : [];
-    const parameters = rawParameters.slice(0, 32).flatMap((item): UnityCliCommandParameter[] => {
-      const parameter = getRecord(item);
-      const parameterName = optionalString(parameter?.name);
-      const type = optionalString(parameter?.type);
-      if (!parameterName || !type || parameterName.length > 120 || type.length > 120 || /[\u0000-\u001f\u007f]/.test(parameterName) || /[\u0000-\u001f\u007f]/.test(type)) return [];
-      return [{ name: parameterName, type, required: parameter?.required === true, ...(Object.prototype.hasOwnProperty.call(parameter ?? {}, "defaultValue") ? { defaultValue: parameter?.defaultValue } : {}) }];
-    });
-    if (!(name in parametersByCommand)) parametersByCommand[name] = parameters;
-    return [name];
-  });
+    if (!isBoundedDescriptorString(name)) continue;
+    names.push(name);
+
+    // Preserve a best-effort descriptor for status display, but retain authoritative
+    // evidence only when every declared parameter is valid and the array was not cut.
+    const rawParameters = record?.parameters;
+    let parsed: UnityCliCommandParameter[] | undefined;
+    if (Array.isArray(rawParameters) && rawParameters.length <= 32) {
+      parsed = [];
+      for (const item of rawParameters) {
+        const parameter = getRecord(item);
+        const parameterName = parameter?.name;
+        const type = parameter?.type;
+        if (!isBoundedDescriptorString(parameterName) || !isBoundedDescriptorString(type) || typeof parameter?.required !== "boolean") {
+          parsed = undefined;
+          break;
+        }
+        parsed.push({ name: parameterName, type, required: parameter.required, ...(Object.prototype.hasOwnProperty.call(parameter, "defaultValue") ? { defaultValue: parameter.defaultValue } : {}) });
+      }
+    }
+    if (!(name in parametersByCommand) && parsed) parametersByCommand[name] = parsed;
+    const entries = verifiedCandidates.get(name) ?? [];
+    entries.push(parsed);
+    verifiedCandidates.set(name, entries);
+  }
+
   const unique = [...new Set(names)].sort((left, right) => left.localeCompare(right));
   const commands = unique.slice(0, 256);
+  const verifiedParametersByCommand = Object.fromEntries([...verifiedCandidates].flatMap(([name, descriptors]) =>
+    descriptors.length === 1 && descriptors[0] ? [[name, descriptors[0]]] : [],
+  ));
   return {
     valid: Boolean(payload?.success === true && valid),
     commands,
     parametersByCommand: Object.fromEntries(commands.flatMap(name => parametersByCommand[name] ? [[name, parametersByCommand[name]]] : [])),
+    verifiedParametersByCommand,
     total: unique.length,
-    truncated: unique.length > 256 || names.length < candidates.length,
+    truncated: unique.length > 256,
   };
 }
 
@@ -571,6 +597,7 @@ export async function inspectUnityCliProjectCapabilities(
     // capability evidence. Keep descriptors for status visibility without enabling dispatch.
     result.advertisedCommands = catalog.commands;
     result.advertisedCommandParameters = catalog.parametersByCommand;
+    result.verifiedCommandParameters = catalog.verifiedParametersByCommand;
     result.advertisedCommandCount = catalog.total;
     result.advertisedCommandsTruncated = catalog.truncated;
     return result;
@@ -578,6 +605,7 @@ export async function inspectUnityCliProjectCapabilities(
   result.commandDiscovery = "available";
   result.advertisedCommands = catalog.commands;
   result.advertisedCommandParameters = catalog.parametersByCommand;
+  result.verifiedCommandParameters = catalog.verifiedParametersByCommand;
   result.advertisedCommandCount = catalog.total;
   result.advertisedCommandsTruncated = catalog.truncated;
   result.commandDiscoverySucceeded = true;
@@ -666,7 +694,7 @@ function runScriptCommandFailure(output: string): "malformed" | "failure" | unde
 }
 
 function hasVerifiedEvalTimeoutContract(capabilities: UnityCliProjectCapabilities): boolean {
-  const parameters = capabilities.advertisedCommandParameters?.eval;
+  const parameters = capabilities.verifiedCommandParameters?.eval;
   return capabilities.pipelineSupportsExecArgv === true
     && Array.isArray(parameters)
     && parameters.length === 2
