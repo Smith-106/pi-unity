@@ -683,6 +683,12 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     const beforePreflight = await readdir(join(project, "Logs"));
     await assert.rejects(() => preflightTool.execute("preflight", { path: project, testPlatform: "EditMode", execution: "connected" }, undefined, undefined, ctx), /pre-existing/);
     assert.deepEqual(await readdir(join(project, "Logs")), beforePreflight, "Pre-dispatch rejection writes no current-run artifact.");
+    await rm(join(project, "Logs"), { recursive: true, force: true }); await writeFile(join(project, "Logs"), "blocked");
+    const persistence = await invoke({ status: "completed", mode: "editor", filter: "Synthetic.Target", summary: {} });
+    assert.equal(persistence.result.isError, true, "Artifact persistence failure is a native error.");
+    assert.match(persistence.result.content[0].text, /Durable terminal evidence could not be persisted/);
+    assert.doesNotMatch(persistence.result.content[0].text, /Normalized artifact:/, "A failed persistence never claims an artifact path.");
+    assert.equal(persistence.calls.filter(args => args[args.indexOf("--timeout") + 2] === "run_tests").length, 1, "Persistence failure never replays dispatch.");
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 // U2 acceptance uses the public inspection tool so selection and link failures cannot be
