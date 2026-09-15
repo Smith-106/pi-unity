@@ -81,7 +81,7 @@ export type UnityCliProjectCapabilities = {
 export type UnityCliExecResult = {
   stdout: string;
   stderr: string;
-  error?: Error & { code?: string | number; signal?: string | null };
+  error?: Error & { code?: string | number | null; signal?: string | null; killed?: boolean };
 };
 
 /** Injectable seam for deterministic capability and planning-dispatch tests. */
@@ -209,9 +209,9 @@ const execFileCollect: UnityCliExecutor = (command, args, options = {}) => {
   return new Promise((resolve) => {
     execFile(command, args, { timeout: options.timeout ?? UNITY_CLI_VERSION_TIMEOUT_MS, signal: options.signal, windowsHide: true }, (error, stdout, stderr) => {
       resolve({
-        stdout: typeof stdout === "string" ? stdout : stdout.toString(),
-        stderr: typeof stderr === "string" ? stderr : stderr.toString(),
-        error: error as UnityCliExecResult["error"],
+        stdout,
+        stderr,
+        error: error ?? undefined,
       });
     });
   });
@@ -488,7 +488,7 @@ async function readPipelineDescriptorCapabilities(projectRoot: string): Promise<
 }
 
 export function isUnityCliTimeout(result: Pick<UnityCliExecResult, "error">): boolean {
-  const error = result.error as (NodeJS.ErrnoException & { killed?: boolean }) | undefined;
+  const error = result.error;
   return error?.code === "ETIMEDOUT" || error?.killed === true || error?.signal === "SIGTERM";
 }
 

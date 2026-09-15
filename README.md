@@ -25,6 +25,16 @@ pi install -l <path-to-pi-unity> # project-local
 
 Pi discovers the extension from `index.ts` and packaged skills from `skills/`. In UI sessions, pi-unity warns once per Pi runtime when Unity CLI is unavailable or `UNITY_CLI_PATH` is invalid. The warning never displays configured paths; install Unity CLI, then restart or reload Pi.
 
+## Development checks
+
+Run `npm ci`, then `npm test` from the package repository. Tests first run the strict production-source type check (`index.ts` and `src/`) using the pinned TypeScript compiler and Node 22 types. Run `npm run typecheck` for that check alone. Tests and eval harnesses execute separately through `tsx`; they are outside this type-check scope.
+
+## Tool presentation
+
+In Pi's terminal UI, Unity tools use compact action headers and project names. Collapsed results show test counts, timing and route when available, plus failures and uncertainty. Expand using Pi's configured tool-details shortcut to see the full project path, highlighted eval code, formatted JSON results, bounded evidence, and artifact paths. Inspection success and test outcomes are displayed separately.
+
+For a local, offline text preview, run `npm run preview:tools` from this package. The preview exercises the renderers without launching Unity; Pi supplies the surrounding tool box and configured keybinding hints in a live session.
+
 ## Included tools
 
 ### Connected Pipeline

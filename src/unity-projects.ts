@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseUnityVersionText, resolveAbsolutePath } from "./unity-core";
@@ -135,7 +136,7 @@ export async function discoverUnityProjects(
       continue;
     }
 
-    let entries: fs.Dirent[] = [];
+    let entries: Dirent[] = [];
     try {
       entries = await fs.readdir(next.dir, { withFileTypes: true });
     } catch {

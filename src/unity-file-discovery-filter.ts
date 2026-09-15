@@ -14,7 +14,7 @@ export const UNITY_EXACT_GENERATED_ROOT_BYPASSED_CODE = "unity_exact_generated_r
 export const UNITY_GENERATED_DIRECTORIES = Object.freeze(["Library", "Temp", "Logs", "obj", "Build", "Builds", "UserSettings", ".vs"] as const);
 
 export function createUnityFileDiscoveryFilterV1(): FileDiscoveryFilterV1 {
-  return Object.freeze({
+  return Object.freeze<FileDiscoveryFilterV1>({
     contractVersion: 1,
     id: UNITY_FILE_DISCOVERY_FILTER_ID_V1,
     kind: "file-discovery-filter",

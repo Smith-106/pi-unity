@@ -24,7 +24,7 @@ const OWNER = Object.freeze({
  * metadata remains project-owned and schema-open.
  */
 export function createUnityArtifactProfileV1(): ArtifactProfileV1 {
-  return Object.freeze({
+  return Object.freeze<ArtifactProfileV1>({
     contractVersion: 1,
     id: UNITY_ARTIFACT_PROFILE_ID_V1,
     kind: "artifact-profile",

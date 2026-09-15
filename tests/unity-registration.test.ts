@@ -131,7 +131,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   const rendererContext = { lastComponent: undefined };
   const testCall = pipelineTestTool.renderCall({ path: "C:/Game", testPlatform: "EditMode", testFilter: "Game.Fast" }, theme, rendererContext);
-  assert.match(testCall.render(300).join("\n"), /EditMode • Game.Fast/, "Test call headers retain platform and bounded filter.");
+  assert.match(testCall.render(300).join("\n"), /EditMode tests[\s\S]*Game.Fast/, "Test call headers retain platform and bounded filter.");
   const reusedTestCall = pipelineTestTool.renderCall({ path: "C:/Game", testPlatform: "PlayMode", testFilter: "secret=visible" }, theme, { lastComponent: testCall });
   assert.equal(reusedTestCall, testCall, "Pipeline call renderer reuses the prior Text component.");
   assert.match(reusedTestCall.render(300).join("\n"), /secret=\[redacted\]/i, "Sensitive-looking filter values are redacted.");
@@ -149,7 +149,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     }
   }
   const inspectCall = inspectionTool.renderCall({ command: "get_scene_hierarchy" }, theme, rendererContext);
-  assert.match(inspectCall.render(300).join("\n"), /command=get_scene_hierarchy/);
+  assert.match(inspectCall.render(300).join("\n"), /get scene hierarchy/);
   const partial = pipelineTestTool.renderResult({ content: [{ type: "text", text: "Unity EditMode tests running; 1.0s elapsed." }], details: {} }, { expanded: false, isPartial: true }, theme, rendererContext);
   assert.match(partial.render(300).join("\n"), /Unity/);
   const completedResult = {
@@ -158,8 +158,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
   };
   const completed = pipelineTestTool.renderResult(completedResult, { expanded: false, isPartial: false }, theme, { lastComponent: partial });
   assert(completed, "Unified test renderer returns a result component.");
-  assert.match(completed.render(300).join("\n"), /Unity/);
-  assert.match(completed.render(300).join("\n"), /Unity/, "Collapsed test results render.");
+  assert.match(completed.render(300).join("\n"), /21 passed · 0 failed/, "Collapsed test results show counts.");
   const expanded = pipelineTestTool.renderResult(completedResult, { expanded: true, isPartial: false }, theme, { lastComponent: completed });
   assert(expanded, "Unified test renderer expands results.");
   assert.match(expanded.render(300).join("\n"), /Unity EditMode tests passed for C:\/Game/, "Expanded Pipeline results show the bounded model-visible evidence.");
@@ -167,7 +166,7 @@ for (const order of ["artifacts-first", "unity-first"] as const) {
     content: [{ type: "text", text: "Unity recompile completed." }],
     details: { mode: "pipeline", status: "passed", pipeline: { operation: "recompile", terminalState: "completed", elapsedSeconds: 1.2 } },
   }, { expanded: false, isPartial: false }, theme, rendererContext);
-  assert.match(recompileWithoutPlayModeDetails.render(300).join("\n"), /Unity recompile completed • 1.2s/, "Optional Play Mode details may be absent without breaking rendering.");
+  assert.match(recompileWithoutPlayModeDetails.render(300).join("\n"), /Recompile completed · 1.2s/, "Optional Play Mode details may be absent without breaking rendering.");
   const collapsedEval = evalTool.renderResult({ content: [{ type: "text", text: "Unity Pipeline eval completed.\n42" }], details: { mode: "pipeline_eval", status: "passed", pipelineEval: { outcome: "dispatched", command: "eval", output: "42", truncated: false } } }, { expanded: false, isPartial: false }, theme, rendererContext);
   assert.match(collapsedEval.render(300).join("\n"), /42/, "Collapsed eval output remains useful.");
   const rejectedEval = evalTool.renderResult({ content: [{ type: "text", text: "Unity Pipeline eval rejected: eval_failed\nRoslyn compilation failed." }], details: { mode: "pipeline_eval", status: "failed", pipelineEval: { outcome: "rejected", code: "eval_failed", message: "Roslyn compilation failed." } } }, { expanded: false, isPartial: false }, theme, { lastComponent: collapsedEval });

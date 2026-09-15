@@ -1,10 +1,12 @@
-import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { renderUnityGuidanceResult, renderUnityToolCall, renderUnityPipelineCall, renderUnityToolResult, renderUnityPipelineResult } from "./src/unity-renderers";
+import { type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import type { Dirent } from "node:fs";
 import { mkdir, readFile, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { getKeybindings, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
 import {
   buildUnityBatchmodeAgentText,
   deriveUnityBatchmodeStatus,
@@ -69,7 +71,7 @@ async function loadFileDiscoveryFilterIntegrationV1(pi: Pick<ExtensionAPI, "getA
 const GUI_WARNING = "This launches the full Unity Editor GUI and is not the same as batchmode/headless Unity.";
 const SINGLE_PROCESS_WARNING = "Unity allows only one process per project folder. GUI Editor and batchmode/headless both count as that one process.";
 
-type UnityToolDetails = {
+export type UnityToolDetails = {
   mode: "gui" | "batchmode" | "status" | "artifacts" | "pipeline_inspection" | "pipeline_eval" | "pipeline_run_script" | "pipeline" | "tests";
   projectRoot: string;
   unityVersion: string;
@@ -97,6 +99,7 @@ type UnityToolDetails = {
   removedLockfile?: string;
   piUnitySettings?: PiUnitySettings;
   sessionSettings?: { allowAutonomousPlayModeExit: boolean };
+  projectState?: { nativeLockfileExists: boolean; runningProcessCount: number; processVerificationIncomplete: boolean; staleLockSuspected: boolean };
   testBatch?: UnityTestBatchPlan;
   cliCapabilities?: UnityCliProjectCapabilities;
   pipelineInspection?: { outcome: "dispatched"; command: string; output: string; truncated: boolean } | { outcome: "rejected"; code: string; message: string };
@@ -681,13 +684,14 @@ async function buildProjectStatusReport(
       status: "passed",
       piUnitySettings,
       sessionSettings: { allowAutonomousPlayModeExit },
+      projectState: { nativeLockfileExists: lockState.nativeLockfileExists, runningProcessCount: runningProcesses.length, processVerificationIncomplete: Boolean(warning), staleLockSuspected },
       cliCapabilities,
     },
   };
 }
 
 async function findNewestFile(root: string, suffixes: string[]): Promise<string | undefined> {
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries: Dirent[];
   try {
     entries = await readdir(root, { withFileTypes: true });
   } catch (error) {
@@ -932,92 +936,6 @@ async function buildBatchmodeReport(
   };
 }
 
-function compactUnityRendererValue(value: unknown, limit = 160): string {
-  const redacted = String(value ?? "").replace(
-    /\b(token|secret|password|api[_-]?key)\s*([:=])\s*((?:\$@?|@\$?)?"(?:""|\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;)}\]]+)/gi,
-    "$1$2[redacted]",
-  );
-  const normalized = redacted.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
-}
-
-function reuseRendererText(context: { lastComponent?: unknown } | undefined, text: string): Text {
-  const component = context?.lastComponent;
-  if (component instanceof Text) {
-    component.setText(text);
-    return component;
-  }
-  return new Text(text, 0, 0);
-}
-
-function renderUnityToolCall(
-  name: string,
-  args: { path?: string; args?: string[] },
-  theme: any,
-  modeLabel: string,
-  emphasis: string,
-  context?: { lastComponent?: unknown },
-): Text {
-  const pathLabel = compactUnityRendererValue(args.path?.trim() || "auto-resolve", 120);
-  const extraArgs = Array.isArray(args.args) && args.args.length > 0
-    ? args.args.slice(0, 4).join(" ") + (args.args.length > 4 ? ` ... +${args.args.length - 4}` : "")
-    : undefined;
-  let text =
-    theme.fg("toolTitle", theme.bold(`${name} `)) +
-    theme.fg("accent", modeLabel) +
-    theme.fg("muted", ` (${emphasis})`);
-  text += `\n  ${theme.fg("accent", pathLabel)}`;
-  if (extraArgs) {
-    text += `\n  ${theme.fg("muted", extraArgs)}`;
-  }
-  return reuseRendererText(context, text);
-}
-
-function renderUnityPipelineCall(
-  name: string,
-  args: { path?: string; testPlatform?: string; testFilter?: string; command?: string; code?: string },
-  theme: any,
-  context: { lastComponent?: unknown },
-): Text {
-  const detail = name === "unity_pipeline_run_tests"
-    ? `${args.testPlatform ?? "tests"}${args.testFilter ? ` • ${compactUnityRendererValue(args.testFilter, 100)}` : ""}`
-    : name === "unity_pipeline_inspect"
-      ? `command=${compactUnityRendererValue(args.command ?? "(missing)", 100)}`
-      : name === "unity_pipeline_eval"
-        ? `C# ${compactUnityRendererValue(args.code ?? "(missing)", 140)}`
-        : "connected bounded recompile";
-  return renderUnityToolCall(name, args, theme, "pipeline", detail, context);
-}
-
-function getToolTextContent(result: any): string {
-  return Array.isArray(result.content)
-    ? result.content.filter((entry: any) => entry?.type === "text").map((entry: any) => String(entry.text ?? "")).join("\n")
-    : "";
-}
-
-function buildBatchmodeStatusLine(details: UnityToolDetails, theme: any): string {
-  const status = details.status ?? "passed";
-  let line = `\n  ${theme.fg("accent", `status=${status}`)}${theme.fg("muted", ` exit=${details.exitCode ?? 0}`)}`;
-  if (details.invocation?.testPlatform) {
-    line += ` ${theme.fg("muted", `platform=${details.invocation.testPlatform}`)}`;
-  }
-  return line;
-}
-
-function buildBatchmodeResultsLine(details: UnityToolDetails, theme: any): string {
-  if (!details.parsedTestResults) {
-    return "";
-  }
-
-  const parts = [
-    details.parsedTestResults.total !== undefined ? `total ${details.parsedTestResults.total}` : undefined,
-    details.parsedTestResults.passed !== undefined ? `passed ${details.parsedTestResults.passed}` : undefined,
-    details.parsedTestResults.failed !== undefined ? `failed ${details.parsedTestResults.failed}` : undefined,
-  ].filter(Boolean);
-
-  return parts.length > 0 ? `\n  ${theme.fg("muted", parts.join(" • "))}` : "";
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new Error("Unity tool execution aborted.");
@@ -1231,7 +1149,7 @@ async function runUnifiedUnityTests(
   discoveryWarning: string | undefined,
   raw: UnityRunTestsRequest,
   signal: AbortSignal | undefined,
-  onUpdate?: (update: { content: Array<{ type: "text"; text: string }> }) => void,
+  onUpdate?: AgentToolUpdateCallback<unknown>,
   allowAutonomousExitPlayMode = true,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: UnityToolDetails & { testResult: NormalizedUnityTestResult; artifactPath: string; route: "connected" | "isolated" } }> {
   const request = normalizeUnityRunTestsRequest(raw);
@@ -1259,7 +1177,7 @@ async function runUnifiedUnityTests(
   if (route === "connected") {
     let result;
     try {
-      result = await runUnityPipelineTests({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), testPlatform: request.testPlatform, testFilter: request.testFilters[0], testCategory: request.testCategories[0], timeoutSeconds: request.timeoutSeconds, allowAutonomousExitPlayMode }, createPipelineDependencies(pi), { signal, onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }] }) });
+      result = await runUnityPipelineTests({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), testPlatform: request.testPlatform, testFilter: request.testFilters[0], testCategory: request.testCategories[0], timeoutSeconds: request.timeoutSeconds, allowAutonomousExitPlayMode }, createPipelineDependencies(pi), { signal, onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }], details: undefined }) });
     } catch (error) {
       if (!(error instanceof UnityPipelineTerminalTestEvidenceError)) throw error;
       const outcome = error.evidence.outcome;
@@ -1330,94 +1248,6 @@ async function runUnifiedUnityTests(
     const text = `${compactUnityTestSummary(normalized)}\nRoute: isolated Unity CLI. Normalized artifact: ${artifactPath}`;
     return { content: [{ type: "text", text }], details: { mode: "tests", projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), editorPath: "Unity CLI", status: outcome === "passed" || outcome === "passed_with_flakes" || outcome === "empty_selection" ? "passed" : "failed", command: command.command, cliArgs: command.args, testBatch: plan, testResult: { ...normalized, tests: [] }, artifactPath, route } };
   });
-}
-
-function renderUnityPipelineResult(result: any, options: { expanded: boolean; isPartial: boolean }, theme: any, context: { lastComponent?: unknown }): Text {
-  const details = result.details as UnityToolDetails | undefined;
-  const primaryText = getToolTextContent(result);
-  if (options.isPartial) {
-    return reuseRendererText(context, `${theme.fg("warning", "…")} ${theme.fg("toolTitle", theme.bold("Unity Pipeline working"))}\n  ${theme.fg("muted", compactUnityRendererValue(primaryText || "Waiting for Pipeline…", 180))}`);
-  }
-  if (!details) return reuseRendererText(context, primaryText || "(no output)");
-
-  const pipeline = details.pipeline;
-  const icon = details.status === "passed" ? theme.fg("success", "✓") : theme.fg("error", "✗");
-  let text: string;
-  if (pipeline?.operation === "recompile") {
-    text = `${icon} ${theme.fg("toolTitle", theme.bold("Unity recompile"))} ${theme.fg("accent", pipeline.terminalState)}${theme.fg("muted", ` • ${pipeline.elapsedSeconds.toFixed(1)}s`)}`;
-  } else if (pipeline?.operation === "tests") {
-    const counts = pipeline.counts;
-    const passed = counts?.passed === undefined || counts?.total === undefined ? "tests completed" : `${counts.passed}/${counts.total} passed`;
-    text = `${icon} ${theme.fg("toolTitle", theme.bold(`Unity ${pipeline.testPlatform ?? ""} tests`.trim()))} ${theme.fg("accent", passed)}${theme.fg("muted", ` • ${pipeline.elapsedSeconds.toFixed(1)}s`)}`;
-  } else if (details.mode === "pipeline_eval" || details.mode === "pipeline_inspection" || details.mode === "pipeline_run_script") {
-    const output = details.mode === "pipeline_eval" ? details.pipelineEval : details.mode === "pipeline_run_script" ? details.pipelineRunScript : details.pipelineInspection;
-    const label = details.mode === "pipeline_eval" ? "Unity Pipeline Eval" : details.mode === "pipeline_run_script" ? "Unity Pipeline Run Script" : "Unity Pipeline Inspection";
-    const summary = output?.outcome === "dispatched" ? output.output || "(no bounded output returned)" : output?.message || primaryText;
-    text = `${icon} ${theme.fg("toolTitle", theme.bold(label))}\n  ${theme.fg("toolOutput", compactUnityRendererValue(summary, 240))}`;
-  } else {
-    return renderUnityToolResult(result, options.expanded, theme);
-  }
-
-  if (pipeline?.playModeHandling && pipeline.playModeHandling !== "not_playing") {
-    const handling = pipeline.playModeHandling === "agent_exited" ? "Play Mode exited by pi-unity" : `Play Mode: ${pipeline.playModeHandling.replace(/_/g, " ")}`;
-    text += `\n  ${theme.fg("warning", handling)}`;
-  }
-  if (options.expanded && primaryText) text += `\n\n${theme.fg("toolOutput", primaryText)}`;
-  else if (!options.expanded) text += ` ${theme.fg("dim", `(${keyHint("app.tools.expand", "details")})`)}`;
-  return reuseRendererText(context, text);
-}
-
-function renderUnityToolResult(result: any, expanded: boolean, theme: any): Text {
-  const details = result.details as UnityToolDetails | undefined;
-  const primaryText = getToolTextContent(result);
-
-  if (!details) {
-    return new Text(primaryText || "(no output)", 0, 0);
-  }
-
-  const icon = details.mode === "gui"
-    ? theme.fg("success", "◉")
-    : details.status === "passed"
-      ? theme.fg("success", "✓")
-      : details.status === "killed"
-        ? theme.fg("warning", "! ")
-        : theme.fg("error", "✗");
-  const title = details.mode === "gui"
-    ? "Unity Editor"
-    : details.mode === "status"
-      ? "Unity Project Status"
-      : details.mode === "artifacts"
-        ? "Unity Artifacts"
-        : details.mode === "pipeline_inspection"
-          ? "Unity Pipeline Inspection"
-          : details.mode === "pipeline_eval"
-            ? "Unity Pipeline Eval"
-            : details.mode === "pipeline_run_script"
-              ? "Unity Pipeline Run Script"
-              : details.mode === "pipeline"
-              ? "Unity Pipeline"
-              : getBatchmodeVariantLabel(details.args);
-  const projectLabel = details.projectRoot ?? "(unknown project)";
-  let text = `${icon} ${theme.fg("toolTitle", theme.bold(title))} ${theme.fg("muted", projectLabel)}`;
-  if (details.mode === "batchmode") {
-    text += buildBatchmodeStatusLine(details, theme);
-    text += buildBatchmodeResultsLine(details, theme);
-  } else if (details.mode === "status") {
-    text += `\n  ${theme.fg("accent", `status=${details.status ?? "passed"}`)}`;
-  } else if (details.mode === "pipeline" && details.pipeline) {
-    text += `\n  ${theme.fg("accent", `${details.pipeline.operation}=${details.pipeline.terminalState}`)}${theme.fg("muted", ` ${details.pipeline.elapsedSeconds.toFixed(1)}s`)}`;
-  }
-
-  if (expanded && primaryText) {
-    text += `\n\n${theme.fg("toolOutput", primaryText)}`;
-  } else if (!expanded && details.mode === "batchmode") {
-    const snippet = summarizeTextForAgent(details.stderr) ?? summarizeTextForAgent(details.stdout);
-    if (snippet) {
-      text += `\n  ${theme.fg("muted", snippet.split(/\r?\n/)[0])}`;
-    }
-  }
-
-  return new Text(text, 0, 0);
 }
 
 function formatUnityGuidanceAudit(result: UnityGuidanceAuditResult): string {
@@ -1618,16 +1448,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderCall(args, theme) {
       return renderUnityToolCall("unity_guidance_audit", args, theme, "guidance", "read-only instruction audit");
     },
-    renderResult(result, { expanded }, theme) {
-      const details = result.details as UnityGuidanceAuditResult | undefined;
-      const primaryText = getToolTextContent(result);
-      if (!details) return new Text(primaryText || "(no output)", 0, 0);
-      const count = details.summary.errors + details.summary.warnings + details.summary.infos;
-      const ancestorCount = details.ancestorCandidates.length;
-      let text = `${count > 0 || ancestorCount > 0 ? theme.fg("warning", "!") : theme.fg("success", "✓")} ${theme.fg("toolTitle", theme.bold("Unity Guidance Audit"))}`;
-      text += `\n  ${theme.fg("muted", `${details.summary.filesScanned} files • ${count} findings${ancestorCount > 0 ? ` • ${ancestorCount} ancestor files excluded` : ""}`)}`;
-      if (expanded && primaryText) text += `\n\n${theme.fg("toolOutput", primaryText)}`;
-      return new Text(text, 0, 0);
+    renderResult(result, options, theme, context) {
+      return renderUnityGuidanceResult(result, options, theme, context);
     },
   });
 
@@ -1656,8 +1478,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderCall(args, theme) {
       return renderUnityToolCall("unity_project_status", args, theme, "status", "inspects project lock");
     },
-    renderResult(result, { expanded }, theme) {
-      return renderUnityToolResult(result, expanded, theme);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderUnityToolResult(result, expanded, theme, context, isPartial);
     },
   });
 
@@ -1679,8 +1501,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
       const { candidate, discoveryWarning } = await resolveProjectCandidate(ctx, params.path);
       return await runUnifiedUnityTests(pi, ctx, candidate, discoveryWarning, params as UnityRunTestsRequest, signal, onUpdate, sessionAllowsAutonomousPlayModeExit(ctx));
     },
-    renderCall(args, theme, context) { return renderUnityToolCall("unity_run_tests", args, theme, "tests", `${args.testPlatform ?? "Unity"} • ${compactUnityRendererValue(args.testFilters?.[0] ?? args.testFilter ?? args.execution ?? "auto", 100)}`, context); },
-    renderResult(result, { expanded }, theme) { return renderUnityToolResult(result, expanded, theme); },
+    renderCall(args, theme, context) { return renderUnityToolCall("unity_run_tests", args, theme, "tests", undefined, context); },
+    renderResult(result, { expanded, isPartial }, theme, context) { return renderUnityToolResult(result, expanded, theme, context, isPartial); },
   });
 
   pi.registerTool({
@@ -1699,7 +1521,7 @@ export default function freeUnityPi(pi: ExtensionAPI) {
       const { candidate } = await resolveProjectCandidate(ctx, params.path);
       const result = await runUnityPipelineRecompile({ projectRoot: candidate.projectRoot, unityVersion: await requireManualUnityVersion(candidate), timeoutSeconds: params.timeoutSeconds, allowAutonomousExitPlayMode: sessionAllowsAutonomousPlayModeExit(ctx) }, createPipelineDependencies(pi), {
         signal,
-        onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+        onUpdate: message => onUpdate?.({ content: [{ type: "text", text: message }], details: undefined }),
       });
       return {
         content: [{ type: "text", text: result.text }],
@@ -1869,8 +1691,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderCall(args, theme) {
       return renderUnityToolCall("unity_inspect_artifacts", args, theme, "artifacts", "reads logs/results");
     },
-    renderResult(result, { expanded }, theme) {
-      return renderUnityToolResult(result, expanded, theme);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderUnityToolResult(result, expanded, theme, context, isPartial);
     },
   });
 
@@ -1928,8 +1750,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderCall(args, theme) {
       return renderUnityToolCall("unity_open_editor", args, theme, "gui", "opens editor window");
     },
-    renderResult(result, { expanded }, theme) {
-      return renderUnityToolResult(result, expanded, theme);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderUnityToolResult(result, expanded, theme, context, isPartial);
     },
   });
 
@@ -1967,8 +1789,8 @@ export default function freeUnityPi(pi: ExtensionAPI) {
       const displayArgs = args.useGraphics ? args.args : ["-nographics", ...(args.args ?? [])];
       return renderUnityToolCall("unity_launch_batchmode", args, theme, "batchmode", getBatchmodeVariantLabel(displayArgs));
     },
-    renderResult(result, { expanded }, theme) {
-      return renderUnityToolResult(result, expanded, theme);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderUnityToolResult(result, expanded, theme, context, isPartial);
     },
   });
 }

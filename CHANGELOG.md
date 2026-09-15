@@ -7,6 +7,20 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+## 0.15.0 - 2026-09-15
+
+### Fixed
+
+- Correct Node directory-entry and child-process types, restore contextual typing for frozen optional integration contracts, and include the required details field in Pi progress updates.
+- Add a pinned strict production-source type check that runs before the test suite.
+- Preserve exact JSON values and raw evidence in expanded results, and prioritize failed/error test diagnostics before skipped records.
+
+### Changed
+
+- Use compact Unity action headers and consistent result summaries inside Pi's existing tool boxes. Expanded results include project identity, highlighted eval code, formatted JSON, evidence, and artifact paths.
+- Show unified test counts, duration, route, failures, and uncertainty while collapsed; distinguish artifact inspection success from test outcomes and correct run-script and test labels.
+- Add an offline tool presentation preview and renderer checks for narrow terminals, redaction, and failure visibility.
+
 ## 0.14.0 - 2026-09-14
 
 ### Fixed
