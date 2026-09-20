@@ -1446,7 +1446,20 @@ export default function freeUnityPi(pi: ExtensionAPI) {
         const { writeFile, mkdir, readFile } = await import("node:fs/promises");
         const { homedir } = await import("node:os");
         const mcpPath = join(homedir(), ".config", "mcp", "mcp.json");
-        const unityCmd = resolveUnityCliCommand();
+        const rawCmd = resolveUnityCliCommand();
+        // Persist an absolute binary path so the MCP gateway does not depend on its own PATH.
+        let unityCmd = rawCmd;
+        if (!rawCmd.includes("/") && !rawCmd.includes("\\")) {
+          const { execFile } = await import("node:child_process");
+          const probe = process.platform === "win32" ? "where" : "which";
+          unityCmd = await new Promise<string>((done) => {
+            execFile(probe, [rawCmd], { timeout: 10_000 }, (err, stdout) => {
+              if (err) { done(rawCmd); return; }
+              const first = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+              done(first || rawCmd);
+            });
+          });
+        }
 
         let config: { mcpServers?: Record<string, unknown> } = {};
         try {
