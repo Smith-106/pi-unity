@@ -67,7 +67,7 @@ for (const forbidden of ["unity_migrate_solution_docs", "UnityMigrationServiceV1
 assert(!indexText.includes('from "@aefree/pi-project-artifacts/contracts/v1"'));
 assert(!indexText.includes('from "@aefree/pi-file-discovery/contracts/v1"'));
 assert(indexText.includes("name: \"unity_pipeline_eval\"") && indexText.includes("name: \"unity_pipeline_inspect\""));
-assert(indexText.includes("name: \"unity_run_tests\"") && indexText.includes("name: \"unity_launch_batchmode\""));
+assert(indexText.includes("name: \"unity_run_tests\"") && indexText.includes("name: \"unity_launch_batchmode\"") && indexText.includes("name: \"unity_build\""));
 assert(!indexText.includes("name: \"unity_run_test_batch\"") && !indexText.includes("name: \"unity_pipeline_run_tests\""));
 assert(indexText.includes("pi.registerCommand(\"unity-open\"") && indexText.includes("piUnity.allowCloseRunningUnityProcess"));
 assert(!indexText.includes("canUseUnityCli("), "All launch routes must use the tri-state Unity CLI availability helper.");

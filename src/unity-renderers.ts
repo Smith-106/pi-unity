@@ -28,7 +28,7 @@ const titles: Record<string, string> = {
   unity_project_status: "Project status", unity_run_tests: "Tests", unity_pipeline_run_tests: "Tests",
   unity_pipeline_recompile: "Recompile", unity_pipeline_eval: "Eval", unity_pipeline_inspect: "Inspect",
   unity_pipeline_run_script: "Run script", unity_inspect_artifacts: "Artifacts", unity_open_editor: "Open Editor",
-  unity_launch_batchmode: "Batchmode", unity_guidance_audit: "Guidance audit",
+  unity_launch_batchmode: "Batchmode", unity_guidance_audit: "Guidance audit", unity_build: "Build",
 };
 export function renderUnityToolCall(name: string, args: Args, theme: Pick<Theme, "fg" | "bold">, _mode?: string, _emphasis?: string, context?: Context): Text {
   const title = args.testPlatform ? `${args.testPlatform} tests` : titles[name] ?? name;
@@ -139,6 +139,7 @@ export function renderUnityToolResult(result: Result, expanded: boolean, theme: 
   }
   else if (details.mode === "gui") summary = `Editor launched${details.pid ? ` · PID ${details.pid}` : ""}`;
   else if (details.mode === "batchmode") summary = `${details.status ?? "unknown"} · exit ${details.exitCode ?? "unknown"}${counts(details.parsedTestResults ?? undefined) ? ` · ${counts(details.parsedTestResults ?? undefined)}` : ""}`;
+  else if (details.mode === "build") summary = `Build ${details.status ?? "unknown"} · exit ${details.exitCode ?? "unknown"}`;
   let text = theme.fg(tone, `${tone === "success" ? "✓" : tone === "error" ? "✗" : "!"} ${summary}`);
   const notices = [details.warning, ...(pipeline?.warnings ?? []), ...(details.evidenceWarnings ?? []), ...(tests?.diagnostics ?? [])].filter((value): value is string => Boolean(value));
   if (pipeline?.playModeHandling && pipeline.playModeHandling !== "not_playing") notices.push(pipeline.playModeHandling === "agent_exited" ? "Play Mode exited by pi-unity" : `Play Mode: ${pipeline.playModeHandling.replace(/_/g, " ")}`);

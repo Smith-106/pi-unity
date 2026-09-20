@@ -178,6 +178,41 @@ export function createUnityCliRunCommand(projectRoot: string, extraEditorArgs: s
   };
 }
 
+export type UnityCliBuildOptions = UnityCliLaunchOptions & {
+  target?: string;
+  profile?: string;
+  executeMethod?: string;
+  outputPath?: string;
+  logFile?: string;
+  noTail?: boolean;
+  allowInstall?: boolean;
+};
+
+export function createUnityCliBuildCommand(projectRoot: string, extraEditorArgs: string[] = [], options: UnityCliBuildOptions = {}): UnityCliCommand {
+  const args = [...unityCliBaseArgs(), "build", projectRoot];
+  appendUnityCliEditorOptions(args, options);
+  if (options.target?.trim()) args.push("--target", options.target.trim());
+  if (options.profile?.trim()) args.push("--profile", options.profile.trim());
+  if (options.executeMethod?.trim()) args.push("--execute-method", options.executeMethod.trim());
+  if (options.outputPath?.trim()) args.push("--output-path", options.outputPath.trim());
+  if (options.logFile?.trim()) args.push("--log-file", options.logFile.trim());
+  if (options.noTail) args.push("--no-tail");
+  if (options.allowInstall) args.push("--allow-install");
+  if (options.timeoutSeconds !== undefined) {
+    args.push("--timeout", String(options.timeoutSeconds));
+  }
+  const forwardedArgs = normalizeUnityCliForwardedArgs(applyDefaultUnityBatchmodeArgs(extraEditorArgs, { useGraphics: options.useGraphics }));
+  // NB: `unity build` takes no trailing `--` editor args (unlike `unity run`);
+  // extra Editor flags travel as one shell-split `--args` string.
+  if (forwardedArgs.length > 0) {
+    args.push("--args", forwardedArgs.join(" "));
+  }
+  return {
+    command: resolveUnityCliCommand(options),
+    args,
+  };
+}
+
 export function createUnityCliBatchmodeReportArgs(projectRoot: string, extraEditorArgs: string[] = [], options: { useGraphics?: boolean } = {}): string[] {
   return buildUnityBatchmodeArgs(projectRoot, extraEditorArgs, options);
 }

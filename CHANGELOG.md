@@ -7,6 +7,10 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+### Added
+
+- Add the `unity_build` tool for headless Player builds via `unity build` (target/profile/execute-method/output-path/log-file), guarded by the per-project launch mutex with timeout-uncertain, no-retry semantics and bounded log evidence.
+
 ## 0.15.0 - 2026-09-15
 
 ### Fixed

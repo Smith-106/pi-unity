@@ -22,7 +22,7 @@ import {
   type UnityParsedTestResults,
 } from "./src/unity-batchmode";
 import { formatPathForUser, hasUnityCommandLineFlag } from "./src/unity-core";
-import { createUnityCliBatchmodeReportArgs, createUnityCliEditorExitCommand, createUnityCliRunCommand, createUnityCliTestCommand, dispatchUnityPipelineRunScript, dispatchUnityPlanningInspection, haveSameKnownProcessIds, inspectUnityCliProjectCapabilities, listRunningUnityCliEditorsForProject, resolveUnityCliCommand, UNITY_PLANNING_READ_COMMANDS, type UnityCliProjectCapabilities } from "./src/unity-cli";
+import { createUnityCliBatchmodeReportArgs, createUnityCliBuildCommand, createUnityCliEditorExitCommand, createUnityCliRunCommand, createUnityCliTestCommand, dispatchUnityPipelineRunScript, dispatchUnityPlanningInspection, haveSameKnownProcessIds, inspectUnityCliProjectCapabilities, listRunningUnityCliEditorsForProject, resolveUnityCliCommand, UNITY_PLANNING_READ_COMMANDS, type UnityCliProjectCapabilities } from "./src/unity-cli";
 import { launchUnityCliOpenDetached } from "./src/unity-launch";
 import { createUnityBatchmodeCommand, launchUnityEditorDetached, resolveUnityEditorPath } from "./src/unity-editor-fallback";
 import { loadPiUnitySettings, type PiUnitySettings } from "./src/pi-unity-settings";
@@ -72,7 +72,7 @@ const GUI_WARNING = "This launches the full Unity Editor GUI and is not the same
 const SINGLE_PROCESS_WARNING = "Unity allows only one process per project folder. GUI Editor and batchmode/headless both count as that one process.";
 
 export type UnityToolDetails = {
-  mode: "gui" | "batchmode" | "status" | "artifacts" | "pipeline_inspection" | "pipeline_eval" | "pipeline_run_script" | "pipeline" | "tests";
+  mode: "gui" | "batchmode" | "build" | "status" | "artifacts" | "pipeline_inspection" | "pipeline_eval" | "pipeline_run_script" | "pipeline" | "tests";
   projectRoot: string;
   unityVersion: string;
   editorPath: string;
@@ -129,6 +129,18 @@ const LAUNCH_BATCHMODE_PARAMS = Type.Object({
   timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 14400, default: 3600, description: "Timeout in seconds for the batchmode process." })),
   launcher: LAUNCHER_SCHEMA,
   closeBlockingUnityProcess: Type.Optional(Type.Boolean({ default: false, description: "When true, pi-unity may close a running Unity process for the resolved project before launch, but only if piUnity.allowCloseRunningUnityProcess is enabled in Pi settings. The process is selected by project matching, not by model-supplied PID." })),
+}, { additionalProperties: false });
+
+const BUILD_PARAMS = Type.Object({
+  path: Type.Optional(Type.String({ description: "Unity project path, workspace copy root, or folder containing project copies." })),
+  target: Type.Optional(Type.String({ maxLength: 100, description: "Build target, e.g. StandaloneWindows64, Android, iOS, WebGL. Required unless profile is used." })),
+  profile: Type.Optional(Type.String({ maxLength: 1000, description: "Unity 6+ build profile: a .asset path or a profile name in Assets/Settings/Build Profiles. The profile defines the target; required unless target is used." })),
+  executeMethod: Type.Optional(Type.String({ maxLength: 500, description: "Static C# entry point to drive the build (e.g. Builder.PerformBuild). Optional: without it the CLI uses Unity's built-in build." })),
+  outputPath: Type.Optional(Type.String({ maxLength: 1000, description: "Build output path. Built-in builds require a destination; with --execute-method the C# method must honor the forwarded path." })),
+  logFile: Type.Optional(Type.String({ maxLength: 1000, description: "Build log file path. Defaults to <project>/Logs/build-<target>-<timestamp>.log and streams to stdout." })),
+  extraArgs: Type.Optional(Type.Array(Type.String(), { description: "Additional Unity Editor flags for the build (e.g. -logFile, -testCategory). Joined into the CLI's shell-split --args string; -nographics is added by default. Quote values containing spaces yourself." })),
+  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 14400, default: 3600, description: "Timeout in seconds for the build process. Bounds the wait only; a timeout never cancels Editor work already started." })),
+  closeBlockingUnityProcess: Type.Optional(Type.Boolean({ default: false, description: "When true, pi-unity may close a running Unity process for the resolved project before building, but only if piUnity.allowCloseRunningUnityProcess is enabled in Pi settings." })),
 }, { additionalProperties: false });
 
 const CONNECTED_TEST_SELECTOR_GUIDANCE = 'unity_run_tests connected execution supports one testFilters entry OR one testCategories entry per call. For independent, non-overlapping selections, use separate execution: "connected" calls with the same explicit path and platform; await and inspect each passing result before issuing the next. Stop the remaining sequence on failure or uncertainty; never retry, broaden the selection, close the Editor, or switch routes automatically. Do not split a mixed filter/category intersection into separate runs.';
@@ -1142,6 +1154,128 @@ async function runGuardedUnityBatchmode(
   );
 }
 
+type GuardedUnityBuildParams = {
+  target?: string;
+  profile?: string;
+  executeMethod?: string;
+  outputPath?: string;
+  logFile?: string;
+  extraArgs?: string[];
+  timeoutSeconds?: number;
+  closeBlockingUnityProcess?: boolean;
+};
+
+async function runGuardedUnityBuild(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  candidate: UnityProjectCandidate,
+  discoveryWarning: string | undefined,
+  params: GuardedUnityBuildParams,
+  signal: AbortSignal | undefined,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: UnityToolDetails }> {
+  if (!params.target?.trim() && !params.profile?.trim()) {
+    throw new Error("unity_build requires target (e.g. StandaloneWindows64) or a Unity 6+ build profile. Pass target or profile.");
+  }
+  if (!params.executeMethod?.trim() && !params.outputPath?.trim()) {
+    throw new Error("unity_build requires outputPath for built-in builds (the CLI needs a destination). Pass outputPath, or executeMethod when a C# builder handles output itself.");
+  }
+  return withUnityProjectLaunchMutex(
+    candidate.projectRoot,
+    { mode: "batchmode", toolName: "unity_build" },
+    async () => {
+      throwIfAborted(signal);
+      const timeoutSeconds = params.timeoutSeconds ?? 3600;
+      const timeoutMs = timeoutSeconds * 1000;
+      const extraArgs = params.extraArgs ?? [];
+      if (hasUnityCommandLineFlag(extraArgs, "-nographics")) {
+        throw new Error("Do not pass -nographics explicitly; pi-unity adds it to builds by default.");
+      }
+      const invocation: UnityBatchmodeInvocation = { isTestRun: false, usesNoGraphics: true, logFilePath: params.logFile?.trim() || undefined };
+      const cliAvailable = await shouldUseUnityCli(pi, undefined, signal);
+      throwIfAborted(signal);
+      if (!cliAvailable) {
+        throw new Error("unity_build requires the Unity CLI (`unity build`). The CLI is unavailable and there is no direct-editor build route; install it or set UNITY_CLI_PATH.");
+      }
+      const command = createUnityCliBuildCommand(candidate.projectRoot, extraArgs, {
+        target: params.target, profile: params.profile, executeMethod: params.executeMethod,
+        outputPath: params.outputPath, logFile: params.logFile, timeoutSeconds,
+      });
+      const closeReport = await closeBlockingUnityProcessesForBatchmode(pi, ctx, candidate, invocation, Boolean(params.closeBlockingUnityProcess), signal);
+      let lockfileCleanup: Awaited<ReturnType<typeof removeStaleLockfileAfterGuardedClose>> | undefined;
+      try {
+        throwIfAborted(signal);
+        lockfileCleanup = await removeStaleLockfileAfterGuardedClose(candidate, closeReport);
+        throwIfAborted(signal);
+        const launchSafety = await enforceLaunchRouteSafety(candidate.projectRoot, "unity-cli");
+        const lockState = launchSafety.state;
+        throwIfAborted(signal);
+        const lockWarning = launchSafety.staleLockDelegated
+          ? `Unity CLI build selected; native Unity lockfile exists at ${lockState.nativeLockfilePath}. No running project process was found by pi-unity preflight, so the build is being delegated to the Unity CLI instead of blocked as a stale lockfile.`
+          : undefined;
+        throwIfAborted(signal);
+        const result = await pi.exec(command.command, command.args, { signal, timeout: timeoutMs + 30_000 });
+        throwIfAborted(signal);
+        const artifacts = await loadUnityBatchmodeArtifacts(ctx.cwd, candidate.projectRoot, invocation);
+        const status = deriveUnityBatchmodeStatus(result.code, Boolean(result.killed), invocation, null);
+        const unityVersion = await requireManualUnityVersion(candidate);
+        const lines = [
+          `Unity build ${status} for ${formatPathForUser(ctx.cwd, candidate.projectRoot)} using Unity ${unityVersion}.`,
+          `Editor: Unity CLI`,
+          `Exit code: ${result.code}`,
+          params.target?.trim() ? `Target: ${params.target.trim()}` : undefined,
+          params.profile?.trim() ? `Profile: ${params.profile.trim()}` : undefined,
+          params.executeMethod?.trim() ? `Execute method: ${params.executeMethod.trim()}` : undefined,
+          params.outputPath?.trim() ? `Output: ${params.outputPath.trim()}` : undefined,
+          SINGLE_PROCESS_WARNING,
+        ].filter((line): line is string => Boolean(line));
+        if (artifacts.logFilePath) lines.push(`Log file: ${artifacts.logFilePath}`);
+        for (const artifactWarning of artifacts.warnings) lines.push(artifactWarning);
+        const combinedWarning = joinWarnings(closeReport.warning, lockfileCleanup.warning, lockWarning, discoveryWarning);
+        if (combinedWarning) lines.push(combinedWarning);
+        const preferredOutput = summarizeTextForAgent(result.stderr) ?? summarizeTextForAgent(result.stdout) ?? summarizeTextForAgent(artifacts.logText);
+        if (preferredOutput) lines.push("Relevant output:", preferredOutput);
+        const text = lines.join("\n");
+        const details: UnityToolDetails = {
+          mode: "build",
+          projectRoot: candidate.projectRoot,
+          unityVersion,
+          editorPath: "Unity CLI",
+          command: command.command,
+          args: command.args,
+          cliArgs: command.args,
+          launcher: "unity-cli",
+          exitCode: result.code,
+          stdout: summarizeTextForAgent(result.stdout, 60, 6000),
+          stderr: summarizeTextForAgent(result.stderr, 60, 6000),
+          killed: Boolean(result.killed),
+          warning: combinedWarning,
+          invocation,
+          artifacts: compactUnityArtifacts(artifacts),
+          status,
+          closedProcesses: closeReport.closedProcesses,
+          forceClosedProcesses: closeReport.forceClosedProcesses,
+          removedLockfile: lockfileCleanup.removedLockfile,
+          piUnitySettings: closeReport.settings,
+        };
+        if (result.killed || status !== "passed") {
+          throw new Error(text);
+        }
+        return { content: [{ type: "text", text }], details };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const closed = closeReport.closedProcesses.map((process) => process.pid ?? "unknown");
+        const sideEffects = [
+          closed.length > 0 ? `Closed Unity process IDs: ${closed.join(", ")}` : undefined,
+          lockfileCleanup?.removedLockfile ? `Removed Unity lockfile: ${lockfileCleanup.removedLockfile}` : undefined,
+          params.outputPath?.trim() ? `Requested build output: ${params.outputPath.trim()}` : undefined,
+          invocation.logFilePath ? `Requested build log: ${invocation.logFilePath}` : undefined,
+        ].filter(Boolean);
+        throw new Error(sideEffects.length > 0 ? `${message}\n\nCompleted pre-launch side effects / evidence paths:\n- ${sideEffects.join("\n- ")}` : message);
+      }
+    },
+  );
+}
+
 async function runUnifiedUnityTests(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -1868,6 +2002,36 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     renderCall(args, theme) {
       const displayArgs = args.useGraphics ? args.args : ["-nographics", ...(args.args ?? [])];
       return renderUnityToolCall("unity_launch_batchmode", args, theme, "batchmode", getBatchmodeVariantLabel(displayArgs));
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderUnityToolResult(result, expanded, theme, context, isPartial);
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_build",
+    label: "Unity Build",
+    description: "Build a Unity project headlessly via `unity build` for a resolved Unity project copy. Requires target or a Unity 6+ build profile.",
+    promptSnippet: "Build a Unity Player via `unity build` when the user explicitly asks for a build artifact (executable, APK/AAB, WebGL, etc.).",
+    promptGuidelines: [
+      "Use unity_build only for Player builds. For generic batchmode Editor runs use unity_launch_batchmode; for tests use unity_run_tests.",
+      "target or profile is required: target for built-in targets (e.g. StandaloneWindows64, Android, iOS, WebGL), profile for Unity 6+ build profiles (required for partner platforms like Meta Quest).",
+      "Unity allows only one process per project folder; the build is guarded by the per-project launch mutex and preflight checks.",
+      "Never build against a project that is already open unless closeBlockingUnityProcess=true and piUnity.allowCloseRunningUnityProcess is enabled for that exact project.",
+      "If a build is blocked by a Unity lockfile, call unity_project_status before asking the user to remove anything.",
+      "A timeout bounds the wait only; it never cancels Editor work already started. Do not relaunch without a new stated hypothesis or explicit user request.",
+      "Prefer reasoning over the compact build summary and concise log excerpts instead of dumping full build logs into context.",
+    ],
+    parameters: BUILD_PARAMS,
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      throwIfAborted(signal);
+      const { candidate, discoveryWarning } = await resolveProjectCandidate(ctx, params.path);
+      throwIfAborted(signal);
+      return runGuardedUnityBuild(pi, ctx, candidate, discoveryWarning, params, signal);
+    },
+    renderCall(args, theme) {
+      const subtitle = [args.target, args.profile, args.executeMethod].filter(Boolean).join(" · ");
+      return renderUnityToolCall("unity_build", args, theme, "build", subtitle || "player build");
     },
     renderResult(result, { expanded, isPartial }, theme, context) {
       return renderUnityToolResult(result, expanded, theme, context, isPartial);

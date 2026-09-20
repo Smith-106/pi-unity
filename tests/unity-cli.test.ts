@@ -6,6 +6,7 @@ import {
   createUnityCliBatchmodeReportArgs,
   createUnityCliEditorExitCommand,
   createUnityCliOpenCommand,
+  createUnityCliBuildCommand,
   createUnityCliRunCommand,
   createUnityCliTestCommand,
   dispatchUnityPlanningInspection,
@@ -530,4 +531,39 @@ assert.deepEqual(cliTest.args.slice(cliTest.args.indexOf("--")), ["--", "-nograp
 const graphicsJunitTest = createUnityCliTestCommand("/game", { testPlatform: "PlayMode", useGraphics: true, reportPaths: { junit: "/game/Logs/play.junit.xml" } });
 assert(graphicsJunitTest.args.includes("--report-format") && graphicsJunitTest.args.includes("junit"));
 assert(!graphicsJunitTest.args.includes("-nographics") && !graphicsJunitTest.args.includes("--"), "Graphics-enabled tests do not receive synthetic batchmode or nographics flags.");
+
+const build = createUnityCliBuildCommand("/workspace/My Game", [], { target: "StandaloneWindows64", outputPath: "./Build/MyGame.exe", timeoutSeconds: 1200 });
+assert.equal(build.command, "unity");
+assert.deepEqual(build.args, [
+  "--no-banner",
+  "--non-interactive",
+  "build",
+  "/workspace/My Game",
+  "--target",
+  "StandaloneWindows64",
+  "--output-path",
+  "./Build/MyGame.exe",
+  "--timeout",
+  "1200",
+  "--args",
+  "-nographics",
+], "unity build takes no trailing -- editor args; the headless default travels via --args.");
+
+const profileBuild = createUnityCliBuildCommand("/workspace/My Game", ["-quit"], { profile: "WebGL", executeMethod: "Builder.PerformBuild", logFile: "/tmp/build.log", noTail: true, cliCommand: "unity-beta" });
+assert.equal(profileBuild.command, "unity-beta");
+assert.deepEqual(profileBuild.args, [
+  "--no-banner",
+  "--non-interactive",
+  "build",
+  "/workspace/My Game",
+  "--profile",
+  "WebGL",
+  "--execute-method",
+  "Builder.PerformBuild",
+  "--log-file",
+  "/tmp/build.log",
+  "--no-tail",
+  "--args",
+  "-nographics",
+], "Extra Editor flags travel as one shell-split --args string; -quit is CLI-managed and stripped.");
 console.log("pi-unity unity-cli tests passed");
