@@ -1415,6 +1415,73 @@ export default function freeUnityPi(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("unity:status", {
+    description: "Show a quick Unity status widget: project copy, declared version, Unity CLI availability, and live Pipeline editors for the current project.",
+    handler: async (args, ctx) => {
+      try {
+        const { candidate } = await resolveProjectCandidate(ctx, args.trim() || undefined);
+        const report = await buildProjectStatusReport(ctx, candidate, ctx.signal, sessionAllowsAutonomousPlayModeExit(ctx));
+        if (ctx.hasUI && ctx.ui.setWidget) {
+          const cap = report.details.cliCapabilities;
+          const lines = [
+            `project: ${formatPathForUser(ctx.cwd, candidate.projectRoot)} (Unity ${report.details.unityVersion ?? "?"})`,
+            `CLI: ${cap?.cliAvailable ? cap.cliVersion ?? "available" : "unavailable"}`,
+            `Pipeline instances (exact copy): ${cap?.matchingInstances?.length ?? 0}`,
+            `running Unity processes: ${report.details.projectState?.runningProcessCount ?? 0}`,
+          ];
+          ctx.ui.setWidget("unity", lines);
+        }
+        ctx.ui.notify(report.text, "info");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+        ctx.ui.notify(message, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("unity:mcp", {
+    description: "Register the official `unity mcp` stdio server with Pi's MCP gateway (~/.config/mcp/mcp.json) so Unity Pipeline tools appear to MCP-capable clients.",
+    handler: async (args, ctx) => {
+      try {
+        const { writeFile, mkdir, readFile } = await import("node:fs/promises");
+        const { homedir } = await import("node:os");
+        const mcpPath = join(homedir(), ".config", "mcp", "mcp.json");
+        const unityCmd = resolveUnityCliCommand();
+
+        let config: { mcpServers?: Record<string, unknown> } = {};
+        try {
+          config = JSON.parse(await readFile(mcpPath, "utf8"));
+        } catch {
+          // missing or malformed file -> start fresh
+        }
+        config.mcpServers ??= {};
+
+        if (args.trim() === "remove") {
+          if (config.mcpServers.unity) {
+            delete config.mcpServers.unity;
+            await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+            ctx.ui.notify(`Removed 'unity' MCP server from ${mcpPath}. Restart/reload the gateway to apply.`, "info");
+          } else {
+            ctx.ui.notify("No 'unity' MCP server registered.", "info");
+          }
+          return;
+        }
+
+        if (config.mcpServers.unity) {
+          ctx.ui.notify(`'unity' MCP server already registered in ${mcpPath}.`, "info");
+          return;
+        }
+        config.mcpServers.unity = { command: unityCmd, args: ["mcp"] };
+        await mkdir(dirname(mcpPath), { recursive: true });
+        await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+        ctx.ui.notify(`Registered 'unity' MCP server (${unityCmd} mcp) in ${mcpPath}. Restart/reload the MCP gateway to pick it up.`, "info");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+        ctx.ui.notify(message, "error");
+      }
+    },
+  });
+
   pi.registerTool({
     name: "unity_guidance_audit",
     label: "Unity Guidance Audit",

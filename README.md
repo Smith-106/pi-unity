@@ -72,16 +72,26 @@ Batchmode runs use `-nographics` by default. Set `useGraphics: true` only for sc
 
 - `/unity-open` — open the current Unity project copy or choose a nearby copy.
 - `/unity-playmode-exit` — allow, disallow, or inspect Play Mode exit behavior for the current session.
+- `/unity:status` — show a quick status widget (project copy, declared Unity version, Unity CLI availability, live Pipeline editors) plus the full status report.
+- `/unity:mcp` — register the official `unity mcp` stdio server with Pi's MCP gateway (`~/.config/mcp/mcp.json`); `/unity:mcp remove` unregisters it.
 
 ## Included skills
 
-Each skill owns a distinct workflow:
+This fork bundles **36 skills**: pi-unity's 5 engine-workflow skills plus the 31 official
+Unity agent skills (from `Unity-Technologies/unity-agent-plugin`, Unity Companion License).
+See [ATTRIBUTION.md](ATTRIBUTION.md) for the license split.
+
+pi-unity's own workflow skills:
 
 - `unity-debugging` — evidence-first diagnosis of Editor, runtime, package, asset, lifecycle, callback, and feature-activation problems.
 - `unity-pipeline-workflows` — connected compilation and focused tests through an already-running exact-copy Pipeline Editor.
 - `unity-batchmode-tests` — isolated or report-producing Unity Test Framework execution.
 - `unity-interactive-playmode-authoring` — temporary live runtime inspection and tuning followed by deliberate persistence when requested.
 - `auditing-unity-agent-guidance` — review and migration of project-local Unity automation instructions.
+
+The official skills supply domain knowledge (IAP, LevelPlay, URP, Tilemap, TMP, localization,
+multiplayer, audio, UI systems, physics, sprite/tilemap authoring, and more) that complements
+the engine tools above.
 
 Operation-specific recovery belongs to the operational skill. `unity-debugging` supplies the reusable diagnostic strategy rather than duplicating every workflow's failure handling.
 
