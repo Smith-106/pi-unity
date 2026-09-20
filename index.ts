@@ -1471,7 +1471,7 @@ export default function freeUnityPi(pi: ExtensionAPI) {
           ctx.ui.notify(`'unity' MCP server already registered in ${mcpPath}.`, "info");
           return;
         }
-        config.mcpServers.unity = { command: unityCmd, args: ["mcp"] };
+        config.mcpServers.unity = { type: "stdio", command: unityCmd, args: ["mcp"] };
         await mkdir(dirname(mcpPath), { recursive: true });
         await writeFile(mcpPath, JSON.stringify(config, null, 2) + "\n", "utf8");
         ctx.ui.notify(`Registered 'unity' MCP server (${unityCmd} mcp) in ${mcpPath}. Restart/reload the MCP gateway to pick it up.`, "info");
