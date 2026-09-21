@@ -7,9 +7,18 @@ and this project follows semantic versioning for public package releases.
 
 ## Unreleased
 
+## 0.16.0 - 2026-09-21
+
 ### Added
 
 - Add the `unity_build` tool for headless Player builds via `unity build` (target/profile/execute-method/output-path/log-file), guarded by the per-project launch mutex with timeout-uncertain, no-retry semantics and bounded log evidence.
+- Bundle the official Unity agent skills (31) alongside the pi-unity engine and skills (5), for 36 skills total, with `LICENSE-Unity.md` and `ATTRIBUTION.md` documenting the dual-license terms.
+- Port the `/unity:status` and `/unity:mcp` slash commands, reusing project resolution and the status report pipeline.
+
+### Fixed
+
+- Write the `unity:mcp` gateway entry with the stdio-typed server schema the gateway expects.
+- Resolve the absolute Unity binary path for the `unity:mcp` gateway entry instead of writing a bare command name.
 
 ## 0.15.0 - 2026-09-15
 
